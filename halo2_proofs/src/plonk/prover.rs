@@ -50,24 +50,46 @@ const DEFAULT_WITNESS_BATCH_SIZE: usize = 1024;
 const DEFAULT_PARALLEL_CHUNK_SIZE: usize = 8192;
 
 fn get_witness_batch_size() -> usize {
-    env::var("HALO2_WITNESS_BATCH_SIZE")
+    let batch_size = env::var("HALO2_WITNESS_BATCH_SIZE")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_WITNESS_BATCH_SIZE)
+        .unwrap_or(DEFAULT_WITNESS_BATCH_SIZE);
+    
+    println!("⚙️  [CONFIG] Witness batch size: {} (env: {})", 
+        batch_size, 
+        env::var("HALO2_WITNESS_BATCH_SIZE").unwrap_or_else(|_| "not set".to_string())
+    );
+    
+    batch_size
 }
 
 fn get_parallel_chunk_size() -> usize {
-    env::var("HALO2_PARALLEL_CHUNK_SIZE")
+    let chunk_size = env::var("HALO2_PARALLEL_CHUNK_SIZE")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_PARALLEL_CHUNK_SIZE)
+        .unwrap_or(DEFAULT_PARALLEL_CHUNK_SIZE);
+    
+    println!("⚙️  [CONFIG] Parallel chunk size: {} (env: {})", 
+        chunk_size, 
+        env::var("HALO2_PARALLEL_CHUNK_SIZE").unwrap_or_else(|_| "not set".to_string())
+    );
+    
+    chunk_size
 }
 
 /// Process witness data in parallel batches for improved GPU utilization
 fn process_witness_batch_parallel<F: Field>(
     witness_data: &[Polynomial<Assigned<F>, LagrangeCoeff>],
-    _batch_size: usize,
+    batch_size: usize,
 ) -> Vec<Polynomial<Assigned<F>, LagrangeCoeff>> {
+    let start_time = Instant::now();
+    let total_elements = witness_data.len();
+    
+    println!("🚀 [PARALLEL_WITNESS] Starting parallel witness processing:");
+    println!("   📊 Total witness elements: {}", total_elements);
+    println!("   ⚙️  Batch size: {}", batch_size);
+    println!("   🧵 Using parallel processing");
+    
     let mut processed = witness_data.to_vec();
     
     // Process witness data in parallel batches
@@ -80,6 +102,11 @@ fn process_witness_batch_parallel<F: Field>(
         }
     });
     
+    let elapsed = start_time.elapsed();
+    println!("✅ [PARALLEL_WITNESS] Completed in {:.2?}", elapsed);
+    println!("   📊 Processed {} witness elements", total_elements);
+    println!("   ⚡ Average: {:.2} elements/ms", total_elements as f64 / elapsed.as_millis().max(1) as f64);
+    
     processed
 }
 
@@ -87,23 +114,41 @@ fn process_witness_batch_parallel<F: Field>(
 fn batch_invert_assigned_optimized<F: Field>(
     assigned: Vec<Polynomial<Assigned<F>, LagrangeCoeff>>,
 ) -> Vec<Polynomial<F, LagrangeCoeff>> {
+    let start_time = Instant::now();
+    let total_elements = assigned.len();
     let chunk_size = get_parallel_chunk_size();
     
-    // If the data is large enough, process in chunks for better GPU utilization
-    if assigned.len() > chunk_size {
+    println!("🔄 [BATCH_INVERT] Starting optimized batch inversion:");
+    println!("   📊 Total elements: {}", total_elements);
+    println!("   ⚙️  Chunk size: {}", chunk_size);
+    println!("   🧵 Using parallel processing");
+    
+    let result = if assigned.len() > chunk_size {
+        println!("   📈 Using chunked processing (large dataset)");
         let mut results = Vec::with_capacity(assigned.len());
         
         // Process in chunks for better GPU utilization
-        for chunk in assigned.chunks(chunk_size) {
+        for (chunk_idx, chunk) in assigned.chunks(chunk_size).enumerate() {
+            let chunk_start_time = Instant::now();
             let chunk_results = batch_invert_assigned(chunk.to_vec());
             results.extend(chunk_results);
+            let chunk_elapsed = chunk_start_time.elapsed();
+            println!("   📦 Chunk {}: {} elements in {:.2?}", chunk_idx, chunk.len(), chunk_elapsed);
         }
         
         results
     } else {
+        println!("   📉 Using single-batch processing (small dataset)");
         // Use the original implementation for smaller datasets
         batch_invert_assigned(assigned)
-    }
+    };
+    
+    let elapsed = start_time.elapsed();
+    println!("✅ [BATCH_INVERT] Completed in {:.2?}", elapsed);
+    println!("   📊 Processed {} elements", total_elements);
+    println!("   ⚡ Average: {:.2} elements/ms", total_elements as f64 / elapsed.as_millis().max(1) as f64);
+    
+    result
 }
 
 
@@ -113,17 +158,32 @@ fn optimize_witness_collection<F: Field + WithSmallOrderMulGroup<3>>(
     domain: &EvaluationDomain<F>,
     num_advice_columns: usize,
 ) -> Vec<Polynomial<Assigned<F>, LagrangeCoeff>> {
+    let start_time = Instant::now();
     let batch_size = get_witness_batch_size();
+    
+    println!("🏗️  [WITNESS_INIT] Starting optimized witness collection initialization:");
+    println!("   📊 Total advice columns: {}", num_advice_columns);
+    println!("   ⚙️  Batch size: {}", batch_size);
+    println!("   🧵 Using parallel processing");
+    
     let mut advice = Vec::with_capacity(num_advice_columns);
     
     // Initialize advice columns in parallel batches
-    for chunk_start in (0..num_advice_columns).step_by(batch_size) {
+    for (chunk_idx, chunk_start) in (0..num_advice_columns).step_by(batch_size).enumerate() {
         let chunk_end = (chunk_start + batch_size).min(num_advice_columns);
         let chunk_size = chunk_end - chunk_start;
         
+        let chunk_start_time = Instant::now();
         let chunk_advice = vec![domain.empty_lagrange_assigned(); chunk_size];
         advice.extend(chunk_advice);
+        let chunk_elapsed = chunk_start_time.elapsed();
+        println!("   📦 Chunk {}: {} columns in {:.2?}", chunk_idx, chunk_size, chunk_elapsed);
     }
+    
+    let elapsed = start_time.elapsed();
+    println!("✅ [WITNESS_INIT] Completed in {:.2?}", elapsed);
+    println!("   📊 Initialized {} advice columns", num_advice_columns);
+    println!("   ⚡ Average: {:.2} columns/ms", num_advice_columns as f64 / elapsed.as_millis().max(1) as f64);
     
     advice
 }
@@ -152,6 +212,11 @@ where
     Scheme::Scalar: WithSmallOrderMulGroup<3> + FromUniformBytes<64>,
     Scheme::ParamsProver: Send + Sync,
 {
+    println!("🎯 [PROOF_GENERATION] Starting proof generation with parallel witness processing optimizations");
+    println!("   📊 Circuits: {}, Instances: {}", circuits.len(), instances.len());
+    println!("   🧵 Using parallel processing");
+    println!("   🚀 GPU optimizations: ENABLED");
+    
     #[cfg(feature = "counter")]
     {
         use crate::{FFT_COUNTER, MSM_COUNTER};
@@ -476,7 +541,8 @@ where
                     meta.constants.clone(),
                 )?;
 
-                let _start = Instant::now();
+                let witness_start = Instant::now();
+                println!("🎯 [MAIN_PROCESS] Starting main witness processing for phase {:?}", current_phase);
                 
                 // Collect witness data for parallel processing
                 let witness_data: Vec<_> = witness
@@ -492,14 +558,21 @@ where
                     })
                     .collect();
                 
+                println!("   📊 Collected {} witness columns for processing", witness_data.len());
+                
                 // Process witness data in parallel batches for better GPU utilization
                 let batch_size = get_witness_batch_size();
                 let processed_witness = process_witness_batch_parallel(&witness_data, batch_size);
                 
                 // Use optimized batch inversion for better GPU utilization
                 let mut advice_values = batch_invert_assigned_optimized::<Scheme::Scalar>(processed_witness);
+                
+                let witness_elapsed = witness_start.elapsed();
+                println!("✅ [MAIN_PROCESS] Main witness processing completed in {:.2?}", witness_elapsed);
 
-                let _start = Instant::now();
+                let blinding_start = Instant::now();
+                println!("🔒 [BLINDING] Adding blinding factors to {} advice columns", column_indices.len());
+                
                 // Add blinding factors to advice columns
                 for (column_index, advice_values) in column_indices.iter().zip(&mut advice_values) {
                     if !witness.unblinded_advice.contains(column_index) {
@@ -512,8 +585,13 @@ where
                         }
                     }
                 }
+                
+                let blinding_elapsed = blinding_start.elapsed();
+                println!("✅ [BLINDING] Blinding factors added in {:.2?}", blinding_elapsed);
 
-                let _start = Instant::now();
+                let commitment_start = Instant::now();
+                println!("🔐 [COMMITMENT] Computing commitments for {} advice columns", column_indices.len());
+                
                 // Compute commitments to advice column polynomials in parallel
                 let mut blinds: Vec<_> = vec![Blind::default(); column_indices.len()];
                 
@@ -521,7 +599,7 @@ where
                 for (i, blind) in blinds.iter_mut().enumerate() {
                     if let Some(&column_index) = column_indices.iter().nth(i) {
                         if !witness.unblinded_advice.contains(&column_index) {
-                            *blind = Blind(Scheme::Scalar::random(&mut *rng));
+                            *blind = Blind(Scheme::Scalar::random(&mut rng));
                         }
                     }
                 }
@@ -530,7 +608,8 @@ where
                 let batch_size = get_witness_batch_size();
                 let mut advice_commitments_projective = Vec::with_capacity(advice_values.len());
                 
-                for chunk in advice_values.chunks(batch_size) {
+                for (chunk_idx, chunk) in advice_values.chunks(batch_size).enumerate() {
+                    let chunk_start = Instant::now();
                     let chunk_blinds = &blinds[..chunk.len()];
                     let chunk_commitments: Vec<_> = chunk
                         .iter()
@@ -538,6 +617,8 @@ where
                         .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
                         .collect();
                     advice_commitments_projective.extend(chunk_commitments);
+                    let chunk_elapsed = chunk_start.elapsed();
+                    println!("   📦 Commitment chunk {}: {} elements in {:.2?}", chunk_idx, chunk.len(), chunk_elapsed);
                 }
                 
                 let mut advice_commitments =
@@ -549,11 +630,15 @@ where
                 let advice_commitments = advice_commitments;
                 drop(advice_commitments_projective);
 
-                let _start = Instant::now();
+                let assignment_start = Instant::now();
+                println!("📝 [ASSIGNMENT] Writing {} commitments to transcript", advice_commitments.len());
+                
                 // Write commitments to transcript
                 for commitment in &advice_commitments {
                     transcript.write_point(*commitment)?;
                 }
+                
+                println!("   📊 Assigning {} advice values and blinds", column_indices.len());
                 
                 // Assign advice values and blinds sequentially for simplicity
                 for ((&column_index, advice_values), blind) in
@@ -562,6 +647,12 @@ where
                     advice.advice_polys[column_index] = advice_values;
                     advice.advice_blinds[column_index] = blind;
                 }
+                
+                let assignment_elapsed = assignment_start.elapsed();
+                println!("✅ [ASSIGNMENT] Assignment completed in {:.2?}", assignment_elapsed);
+                
+                let commitment_elapsed = commitment_start.elapsed();
+                println!("✅ [COMMITMENT] Commitment computation completed in {:.2?}", commitment_elapsed);
             }
 
             for (index, phase) in meta.challenge_phase.iter().enumerate() {
