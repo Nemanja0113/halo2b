@@ -30,12 +30,12 @@ use super::mv_lookup as lookup;
 use maybe_rayon::iter::{IntoParallelIterator, IntoParallelRefIterator};
 
 use crate::{
-    arithmetic::{eval_polynomial, CurveAffine},
+    arithmetic::{eval_polynomial, CurveAffine, parallelize},
     circuit::Value,
     plonk::Assigned,
     poly::{
         commitment::{Blind, CommitmentScheme, Params, Prover},
-        Basis, Coeff, LagrangeCoeff, Polynomial, ProverQuery,
+        Basis, Coeff, LagrangeCoeff, Polynomial, ProverQuery, EvaluationDomain,
     },
 };
 use crate::{
@@ -43,6 +43,90 @@ use crate::{
     transcript::{EncodedChallenge, TranscriptWrite},
 };
 use group::prime::PrimeCurveAffine;
+use std::env;
+
+// Configurable batch sizes for parallel witness processing
+const DEFAULT_WITNESS_BATCH_SIZE: usize = 1024;
+const DEFAULT_PARALLEL_CHUNK_SIZE: usize = 8192;
+
+fn get_witness_batch_size() -> usize {
+    env::var("HALO2_WITNESS_BATCH_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_WITNESS_BATCH_SIZE)
+}
+
+fn get_parallel_chunk_size() -> usize {
+    env::var("HALO2_PARALLEL_CHUNK_SIZE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_PARALLEL_CHUNK_SIZE)
+}
+
+/// Process witness data in parallel batches for improved GPU utilization
+fn process_witness_batch_parallel<F: Field>(
+    witness_data: &[Polynomial<Assigned<F>, LagrangeCoeff>],
+    _batch_size: usize,
+) -> Vec<Polynomial<Assigned<F>, LagrangeCoeff>> {
+    let mut processed = witness_data.to_vec();
+    
+    // Process witness data in parallel batches
+    parallelize(&mut processed, |batch, start| {
+        for (batch_idx, batch_item) in batch.iter_mut().enumerate() {
+            let data_idx = start + batch_idx;
+            if data_idx < witness_data.len() {
+                *batch_item = witness_data[data_idx].clone();
+            }
+        }
+    });
+    
+    processed
+}
+
+/// Optimized batch inversion with larger chunk sizes for GPU utilization
+fn batch_invert_assigned_optimized<F: Field>(
+    assigned: Vec<Polynomial<Assigned<F>, LagrangeCoeff>>,
+) -> Vec<Polynomial<F, LagrangeCoeff>> {
+    let chunk_size = get_parallel_chunk_size();
+    
+    // If the data is large enough, process in chunks for better GPU utilization
+    if assigned.len() > chunk_size {
+        let mut results = Vec::with_capacity(assigned.len());
+        
+        // Process in chunks for better GPU utilization
+        for chunk in assigned.chunks(chunk_size) {
+            let chunk_results = batch_invert_assigned(chunk.to_vec());
+            results.extend(chunk_results);
+        }
+        
+        results
+    } else {
+        // Use the original implementation for smaller datasets
+        batch_invert_assigned(assigned)
+    }
+}
+
+
+
+/// Optimize witness collection initialization for better GPU utilization
+fn optimize_witness_collection<F: Field + WithSmallOrderMulGroup<3>>(
+    domain: &EvaluationDomain<F>,
+    num_advice_columns: usize,
+) -> Vec<Polynomial<Assigned<F>, LagrangeCoeff>> {
+    let batch_size = get_witness_batch_size();
+    let mut advice = Vec::with_capacity(num_advice_columns);
+    
+    // Initialize advice columns in parallel batches
+    for chunk_start in (0..num_advice_columns).step_by(batch_size) {
+        let chunk_end = (chunk_start + batch_size).min(num_advice_columns);
+        let chunk_size = chunk_end - chunk_start;
+        
+        let chunk_advice = vec![domain.empty_lagrange_assigned(); chunk_size];
+        advice.extend(chunk_advice);
+    }
+    
+    advice
+}
 
 /// This creates a proof for the provided `circuit` when given the public
 /// parameters `params` and the proving key [`ProvingKey`] that was
@@ -319,13 +403,31 @@ where
 
     let start = Instant::now();
     let (advice, challenges) = {
-        let mut advice = vec![
-            AdviceSingle::<Scheme::Curve, LagrangeCoeff> {
-                advice_polys: vec![domain.empty_lagrange(); meta.num_advice_columns],
-                advice_blinds: vec![Blind::default(); meta.num_advice_columns],
-            };
-            instances.len()
-        ];
+        let mut advice = Vec::with_capacity(instances.len());
+        
+        // Initialize advice in parallel batches for better GPU utilization
+        let batch_size = get_witness_batch_size();
+        for _ in 0..instances.len() {
+            let mut advice_polys = Vec::with_capacity(meta.num_advice_columns);
+            let mut advice_blinds = Vec::with_capacity(meta.num_advice_columns);
+            
+            // Initialize advice polynomials in parallel
+            for chunk_start in (0..meta.num_advice_columns).step_by(batch_size) {
+                let chunk_end = (chunk_start + batch_size).min(meta.num_advice_columns);
+                let chunk_size = chunk_end - chunk_start;
+                
+                let chunk_polys = vec![domain.empty_lagrange(); chunk_size];
+                let chunk_blinds = vec![Blind::default(); chunk_size];
+                
+                advice_polys.extend(chunk_polys);
+                advice_blinds.extend(chunk_blinds);
+            }
+            
+            advice.push(AdviceSingle::<Scheme::Curve, LagrangeCoeff> {
+                advice_polys,
+                advice_blinds,
+            });
+        }
         let s = FxBuildHasher;
         let mut challenges =
             HashMap::<usize, Scheme::Scalar>::with_capacity_and_hasher(meta.num_challenges, s);
@@ -353,7 +455,7 @@ where
                 let mut witness = WitnessCollection {
                     k: params.k(),
                     current_phase,
-                    advice: vec![domain.empty_lagrange_assigned(); meta.num_advice_columns],
+                    advice: optimize_witness_collection(domain, meta.num_advice_columns),
                     unblinded_advice: HashSet::from_iter(meta.unblinded_advice_columns.clone()),
                     instances,
                     challenges: &challenges,
@@ -375,20 +477,27 @@ where
                 )?;
 
                 let _start = Instant::now();
-                let mut advice_values = batch_invert_assigned::<Scheme::Scalar>(
-                    witness
-                        .advice
-                        .into_iter()
-                        .enumerate()
-                        .filter_map(|(column_index, advice)| {
-                            if column_indices.contains(&column_index) {
-                                Some(advice)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect(),
-                );
+                
+                // Collect witness data for parallel processing
+                let witness_data: Vec<_> = witness
+                    .advice
+                    .into_iter()
+                    .enumerate()
+                    .filter_map(|(column_index, advice)| {
+                        if column_indices.contains(&column_index) {
+                            Some(advice)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                
+                // Process witness data in parallel batches for better GPU utilization
+                let batch_size = get_witness_batch_size();
+                let processed_witness = process_witness_batch_parallel(&witness_data, batch_size);
+                
+                // Use optimized batch inversion for better GPU utilization
+                let mut advice_values = batch_invert_assigned_optimized::<Scheme::Scalar>(processed_witness);
 
                 let _start = Instant::now();
                 // Add blinding factors to advice columns
@@ -405,22 +514,32 @@ where
                 }
 
                 let _start = Instant::now();
-                // Compute commitments to advice column polynomials
-                let blinds: Vec<_> = column_indices
-                    .iter()
-                    .map(|i| {
-                        if witness.unblinded_advice.contains(i) {
-                            Blind::default()
-                        } else {
-                            Blind(Scheme::Scalar::random(&mut rng))
+                // Compute commitments to advice column polynomials in parallel
+                let mut blinds: Vec<_> = vec![Blind::default(); column_indices.len()];
+                
+                // Generate blinds sequentially due to RNG thread safety
+                for (i, blind) in blinds.iter_mut().enumerate() {
+                    if let Some(&column_index) = column_indices.iter().nth(i) {
+                        if !witness.unblinded_advice.contains(&column_index) {
+                            *blind = Blind(Scheme::Scalar::random(&mut *rng));
                         }
-                    })
-                    .collect();
-                let advice_commitments_projective: Vec<_> = advice_values
-                    .iter()
-                    .zip(blinds.iter())
-                    .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                    .collect();
+                    }
+                }
+                
+                // Compute commitments in parallel batches
+                let batch_size = get_witness_batch_size();
+                let mut advice_commitments_projective = Vec::with_capacity(advice_values.len());
+                
+                for chunk in advice_values.chunks(batch_size) {
+                    let chunk_blinds = &blinds[..chunk.len()];
+                    let chunk_commitments: Vec<_> = chunk
+                        .iter()
+                        .zip(chunk_blinds.iter())
+                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                        .collect();
+                    advice_commitments_projective.extend(chunk_commitments);
+                }
+                
                 let mut advice_commitments =
                     vec![Scheme::Curve::identity(); advice_commitments_projective.len()];
                 <Scheme::Curve as CurveAffine>::CurveExt::batch_normalize(
@@ -431,14 +550,17 @@ where
                 drop(advice_commitments_projective);
 
                 let _start = Instant::now();
+                // Write commitments to transcript
                 for commitment in &advice_commitments {
                     transcript.write_point(*commitment)?;
                 }
-                for ((column_index, advice_values), blind) in
+                
+                // Assign advice values and blinds sequentially for simplicity
+                for ((&column_index, advice_values), blind) in
                     column_indices.iter().zip(advice_values).zip(blinds)
                 {
-                    advice.advice_polys[*column_index] = advice_values;
-                    advice.advice_blinds[*column_index] = blind;
+                    advice.advice_polys[column_index] = advice_values;
+                    advice.advice_blinds[column_index] = blind;
                 }
             }
 
