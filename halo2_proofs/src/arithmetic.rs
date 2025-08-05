@@ -186,7 +186,7 @@ pub fn g_to_lagrange<C: PrimeCurveAffine>(g_projective: Vec<C::Curve>, k: u32) -
     let n = g_lagrange_projective.len();
     let fft_data = FFTData::new(n, omega, omega_inv);
 
-            optimized_fft(&mut g_lagrange_projective, omega_inv, k, &fft_data, true);
+            best_fft_cpu(&mut g_lagrange_projective, omega_inv, k, &fft_data, true);
     parallelize(&mut g_lagrange_projective, |g, _| {
         for g in g.iter_mut() {
             *g *= n_inv;
@@ -540,7 +540,7 @@ pub fn batched_msm_operations<C: CurveAffine>(
 }
 
 /// Optimized FFT dispatch with better batching logic
-pub fn optimized_fft<Scalar: Field + ff::PrimeField, G: FftGroup<Scalar>>(
+pub fn optimized_fft<Scalar: Field + ff::PrimeField, G: FftGroup<Scalar> + ff::PrimeField>(
     scalars: &mut [G],
     omega: Scalar,
     log_n: u32,
