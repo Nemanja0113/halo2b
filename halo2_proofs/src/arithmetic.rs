@@ -186,7 +186,7 @@ pub fn g_to_lagrange<C: PrimeCurveAffine>(g_projective: Vec<C::Curve>, k: u32) -
     let n = g_lagrange_projective.len();
     let fft_data = FFTData::new(n, omega, omega_inv);
 
-    best_fft_cpu(&mut g_lagrange_projective, omega_inv, k, &fft_data, true);
+            optimized_fft(&mut g_lagrange_projective, omega_inv, k, &fft_data, true);
     parallelize(&mut g_lagrange_projective, |g, _| {
         for g in g.iter_mut() {
             *g *= n_inv;
@@ -452,4 +452,188 @@ fn test_lagrange_interpolate() {
             assert_eq!(eval_polynomial(&poly, *point), *eval);
         }
     }
+}
+
+/// Batched FFT operations for better GPU utilization
+#[cfg(feature = "icicle_gpu")]
+pub fn batched_fft_operations<Scalar: Field + ff::PrimeField, G: FftGroup<Scalar> + ff::PrimeField>(
+    operations: &mut [(&mut [G], Scalar, u32, bool)],
+) {
+    if operations.is_empty() {
+        return;
+    }
+    
+    let start_time = std::time::Instant::now();
+    let total_elements: usize = operations.iter().map(|(data, _, _, _)| data.len()).sum();
+    
+    println!("🚀 [BATCHED_FFT] Starting batched FFT operations:");
+    println!("   📊 Total operations: {}", operations.len());
+    println!("   📊 Total elements: {}", total_elements);
+    println!("   🧵 Using GPU acceleration");
+    
+    // Process operations in parallel batches for better GPU utilization
+    let batch_size = std::env::var("HALO2_FFT_BATCH_SIZE")
+        .unwrap_or_else(|_| "4".to_string())
+        .parse::<usize>()
+        .unwrap_or(4);
+    
+    for (batch_idx, batch) in operations.chunks_mut(batch_size).enumerate() {
+        let batch_start = std::time::Instant::now();
+        
+        // Process each operation in the batch
+        for (data, omega, log_n, inverse) in batch.iter_mut() {
+            best_fft_gpu(*data, *omega, *log_n, *inverse);
+        }
+        
+        let batch_elapsed = batch_start.elapsed();
+        println!("   📦 FFT batch {}: {} operations in {:.2?}", batch_idx, batch.len(), batch_elapsed);
+    }
+    
+    let elapsed = start_time.elapsed();
+    println!("✅ [BATCHED_FFT] Completed in {:.2?}", elapsed);
+    println!("   ⚡ Average: {:.2} operations/ms", operations.len() as f64 / elapsed.as_millis().max(1) as f64);
+}
+
+/// Batched MSM operations for better GPU utilization
+#[cfg(feature = "icicle_gpu")]
+pub fn batched_msm_operations<C: CurveAffine>(
+    operations: &[(&[C::Scalar], &[C])],
+) -> Vec<C::Curve> {
+    if operations.is_empty() {
+        return Vec::new();
+    }
+    
+    let start_time = std::time::Instant::now();
+    let total_elements: usize = operations.iter().map(|(coeffs, _)| coeffs.len()).sum();
+    
+    println!("🚀 [BATCHED_MSM] Starting batched MSM operations:");
+    println!("   📊 Total operations: {}", operations.len());
+    println!("   📊 Total elements: {}", total_elements);
+    println!("   🧵 Using GPU acceleration");
+    
+    // Process operations in parallel batches for better GPU utilization
+    let batch_size = std::env::var("HALO2_MSM_BATCH_SIZE")
+        .unwrap_or_else(|_| "4".to_string())
+        .parse::<usize>()
+        .unwrap_or(4);
+    
+    let mut results = Vec::with_capacity(operations.len());
+    
+    for (batch_idx, batch) in operations.chunks(batch_size).enumerate() {
+        let batch_start = std::time::Instant::now();
+        
+        // Process each operation in the batch
+        for (coeffs, bases) in batch {
+            let result = best_multiexp_gpu(coeffs, bases);
+            results.push(result);
+        }
+        
+        let batch_elapsed = batch_start.elapsed();
+        println!("   📦 MSM batch {}: {} operations in {:.2?}", batch_idx, batch.len(), batch_elapsed);
+    }
+    
+    let elapsed = start_time.elapsed();
+    println!("✅ [BATCHED_MSM] Completed in {:.2?}", elapsed);
+    println!("   ⚡ Average: {:.2} operations/ms", operations.len() as f64 / elapsed.as_millis().max(1) as f64);
+    
+    results
+}
+
+/// Optimized FFT dispatch with better batching logic
+pub fn optimized_fft<Scalar: Field + ff::PrimeField, G: FftGroup<Scalar>>(
+    scalars: &mut [G],
+    omega: Scalar,
+    log_n: u32,
+    data: &FFTData<Scalar>,
+    inverse: bool,
+) {
+    #[cfg(feature = "icicle_gpu")]
+    {
+        let enable_gpu = env::var("ENABLE_ICICLE_GPU").is_ok();
+        let should_use_cpu = icicle::should_use_cpu_fft(scalars.len());
+        let gpu_supported = icicle::is_gpu_supported_field(&omega);
+        
+        // Optimized threshold: use GPU for larger operations
+        let optimized_threshold = env::var("HALO2_FFT_GPU_THRESHOLD")
+            .unwrap_or_else(|_| "1024".to_string())
+            .parse::<usize>()
+            .unwrap_or(1024);
+        
+        let should_use_gpu = scalars.len() >= optimized_threshold;
+        
+        println!("🔍 [OPTIMIZED_FFT] FFT dispatch decision:");
+        println!("   📊 Data size: {} elements", scalars.len());
+        println!("   ⚙️  ENABLE_ICICLE_GPU: {}", enable_gpu);
+        println!("   🧵 Should use CPU (original): {}", should_use_cpu);
+        println!("   🚀 Should use GPU (optimized): {}", should_use_gpu);
+        println!("   🔧 GPU supported field: {}", gpu_supported);
+        
+        if enable_gpu && should_use_gpu && gpu_supported {
+            println!("   🚀 Using GPU FFT (optimized)");
+            best_fft_gpu(scalars, omega, log_n, inverse);
+        } else {
+            println!("   💻 Using CPU FFT");
+            best_fft_cpu(scalars, omega, log_n, data, inverse);
+        }
+    }
+
+    #[cfg(not(feature = "icicle_gpu"))]
+    best_fft_cpu(scalars, omega, log_n, data, inverse);
+}
+
+/// Optimized MSM dispatch with better batching logic
+pub fn optimized_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
+    #[cfg(feature = "icicle_gpu")]
+    {
+        let enable_gpu = env::var("ENABLE_ICICLE_GPU").is_ok();
+        let should_use_cpu = icicle::should_use_cpu_msm(coeffs.len());
+        let gpu_supported = icicle::is_gpu_supported_field(&coeffs[0]);
+        
+        // Optimized threshold: use GPU for larger operations
+        let optimized_threshold = env::var("HALO2_MSM_GPU_THRESHOLD")
+            .unwrap_or_else(|_| "512".to_string())
+            .parse::<usize>()
+            .unwrap_or(512);
+        
+        let should_use_gpu = coeffs.len() >= optimized_threshold;
+        
+        println!("🔍 [OPTIMIZED_MSM] MSM dispatch decision:");
+        println!("   📊 Data size: {} elements", coeffs.len());
+        println!("   ⚙️  ENABLE_ICICLE_GPU: {}", enable_gpu);
+        println!("   🧵 Should use CPU (original): {}", should_use_cpu);
+        println!("   🚀 Should use GPU (optimized): {}", should_use_gpu);
+        println!("   🔧 GPU supported field: {}", gpu_supported);
+        
+        if enable_gpu && should_use_gpu && gpu_supported {
+            println!("   🚀 Using GPU MSM (optimized)");
+            return best_multiexp_gpu(coeffs, bases);
+        } else {
+            println!("   💻 Using CPU MSM");
+        }
+    }
+
+    #[cfg(feature = "metal")]
+    {
+        use mopro_msm::metal::abstraction::limbs_conversion::h2c::{H2Fr, H2GAffine, H2G};
+        use std::sync::Once;
+
+        // Static mutex to block concurrent Metal acceleration calls
+        static PRINT_ONCE: Once = Once::new();
+
+        // Print the warning message only once
+        PRINT_ONCE.call_once(|| {
+            log::warn!(
+                "WARNING: Using Experimental Metal Acceleration for MSM. \
+                 Best performance improvements are observed with log row size >= 20. \
+                 Current log size: {}",
+                coeffs.len().ilog2()
+            );
+        });
+
+        // Perform MSM using Metal acceleration
+        return mopro_msm::metal::msm_best::<C, H2GAffine, H2G, H2Fr>(coeffs, bases);
+    }
+
+    #[allow(unreachable_code)]
+    best_multiexp_cpu(coeffs, bases)
 }

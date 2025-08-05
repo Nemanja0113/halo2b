@@ -1,4 +1,4 @@
-use crate::arithmetic::{best_multiexp, g_to_lagrange, parallelize};
+use crate::arithmetic::{best_multiexp, optimized_multiexp, g_to_lagrange, parallelize};
 
 use crate::helpers::SerdeCurveAffine;
 use crate::poly::commitment::{Blind, CommitmentScheme, Params, ParamsProver, ParamsVerifier};
