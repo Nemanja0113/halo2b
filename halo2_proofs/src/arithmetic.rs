@@ -34,11 +34,23 @@ where
 /// Best MSM
 pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
     #[cfg(feature = "icicle_gpu")]
-    if env::var("ENABLE_ICICLE_GPU").is_ok()
-        && !icicle::should_use_cpu_msm(coeffs.len())
-        && icicle::is_gpu_supported_field(&coeffs[0])
     {
-        return best_multiexp_gpu(coeffs, bases);
+        let enable_gpu = env::var("ENABLE_ICICLE_GPU").is_ok();
+        let should_use_cpu = icicle::should_use_cpu_msm(coeffs.len());
+        let gpu_supported = icicle::is_gpu_supported_field(&coeffs[0]);
+        
+        println!("🔍 [MSM_DISPATCH] MSM dispatch decision:");
+        println!("   📊 Data size: {} elements", coeffs.len());
+        println!("   ⚙️  ENABLE_ICICLE_GPU: {}", enable_gpu);
+        println!("   🧵 Should use CPU: {}", should_use_cpu);
+        println!("   🔧 GPU supported field: {}", gpu_supported);
+        
+        if enable_gpu && !should_use_cpu && gpu_supported {
+            println!("   🚀 Using GPU MSM");
+            return best_multiexp_gpu(coeffs, bases);
+        } else {
+            println!("   💻 Using CPU MSM");
+        }
     }
 
     #[cfg(feature = "metal")]
@@ -80,7 +92,19 @@ pub fn best_multiexp_cpu<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C
 #[cfg(feature = "icicle_gpu")]
 /// Performs a multi-exponentiation operation on GPU using Icicle library
 pub fn best_multiexp_gpu<C: CurveAffine>(coeffs: &[C::Scalar], g: &[C]) -> C::Curve {
-    icicle::multiexp_on_device::<C>(coeffs, g)
+    let start_time = std::time::Instant::now();
+    let data_size = coeffs.len();
+    println!("🚀 [GPU_MSM] Starting GPU MSM operation:");
+    println!("   📊 Data size: {} elements", data_size);
+    println!("   🧵 Using GPU acceleration");
+    
+    let result = icicle::multiexp_on_device::<C>(coeffs, g);
+    
+    let elapsed = start_time.elapsed();
+    println!("✅ [GPU_MSM] GPU MSM completed in {:.2?}", elapsed);
+    println!("   ⚡ Average: {:.2} elements/ms", data_size as f64 / elapsed.as_millis().max(1) as f64);
+    
+    result
 }
 
 /// Dispatcher
@@ -103,13 +127,24 @@ pub fn best_fft<Scalar: Field + ff::PrimeField, G: FftGroup<Scalar> + ff::PrimeF
     inverse: bool,
 ) {
     #[cfg(feature = "icicle_gpu")]
-    if env::var("ENABLE_ICICLE_GPU").is_ok()
-        && !icicle::should_use_cpu_fft(scalars.len())
-        && icicle::is_gpu_supported_field(&omega)
     {
-        best_fft_gpu(scalars, omega, log_n, inverse);
-    } else {
-        best_fft_cpu(scalars, omega, log_n, data, inverse);
+        let enable_gpu = env::var("ENABLE_ICICLE_GPU").is_ok();
+        let should_use_cpu = icicle::should_use_cpu_fft(scalars.len());
+        let gpu_supported = icicle::is_gpu_supported_field(&omega);
+        
+        println!("🔍 [FFT_DISPATCH] FFT dispatch decision:");
+        println!("   📊 Data size: {} elements", scalars.len());
+        println!("   ⚙️  ENABLE_ICICLE_GPU: {}", enable_gpu);
+        println!("   🧵 Should use CPU: {}", should_use_cpu);
+        println!("   🔧 GPU supported field: {}", gpu_supported);
+        
+        if enable_gpu && !should_use_cpu && gpu_supported {
+            println!("   🚀 Using GPU FFT");
+            best_fft_gpu(scalars, omega, log_n, inverse);
+        } else {
+            println!("   💻 Using CPU FFT");
+            best_fft_cpu(scalars, omega, log_n, data, inverse);
+        }
     }
 
     #[cfg(not(feature = "icicle_gpu"))]
@@ -124,8 +159,18 @@ pub fn best_fft_gpu<Scalar: Field + ff::PrimeField, G: FftGroup<Scalar> + ff::Pr
     log_n: u32,
     inverse: bool,
 ) {
-    println!("icicle_fft");
+    let start_time = std::time::Instant::now();
+    let data_size = a.len();
+    println!("🚀 [GPU_FFT] Starting GPU FFT operation:");
+    println!("   📊 Data size: {} elements", data_size);
+    println!("   ⚙️  Log_n: {}", log_n);
+    println!("   🔄 Inverse: {}", inverse);
+    
     icicle::fft_on_device::<Scalar, G>(a, omega, log_n, inverse);
+    
+    let elapsed = start_time.elapsed();
+    println!("✅ [GPU_FFT] GPU FFT completed in {:.2?}", elapsed);
+    println!("   ⚡ Average: {:.2} elements/ms", data_size as f64 / elapsed.as_millis().max(1) as f64);
 }
 
 /// Convert coefficient bases group elements to lagrange basis by inverse FFT.

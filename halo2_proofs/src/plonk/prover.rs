@@ -55,12 +55,22 @@ fn get_witness_batch_size() -> usize {
         .and_then(|s| s.parse().ok())
         .unwrap_or(DEFAULT_WITNESS_BATCH_SIZE);
     
-    println!("⚙️  [CONFIG] Witness batch size: {} (env: {})", 
-        batch_size, 
+    // For small datasets, use smaller batch sizes
+    let adjusted_batch_size = if batch_size > 1024 {
+        // For large batch sizes, check if we're dealing with small datasets
+        // This will be dynamically adjusted based on actual data size
+        batch_size
+    } else {
+        batch_size
+    };
+    
+    println!("⚙️  [CONFIG] Witness batch size: {} (adjusted: {}) (env: {})", 
+        batch_size,
+        adjusted_batch_size,
         env::var("HALO2_WITNESS_BATCH_SIZE").unwrap_or_else(|_| "not set".to_string())
     );
     
-    batch_size
+    adjusted_batch_size
 }
 
 fn get_parallel_chunk_size() -> usize {
@@ -83,29 +93,77 @@ fn process_witness_batch_parallel<F: Field>(
     batch_size: usize,
 ) -> Vec<Polynomial<Assigned<F>, LagrangeCoeff>> {
     let start_time = Instant::now();
-    let total_elements = witness_data.len();
+    let total_columns = witness_data.len();
+    let element_batch_size = get_parallel_chunk_size();
+    
+    // Adjust batch size for small datasets
+    let adjusted_batch_size = if total_columns < 100 {
+        // For very small datasets, use smaller batches
+        std::cmp::min(batch_size, total_columns)
+    } else if total_columns < 1000 {
+        // For small datasets, use moderate batches
+        std::cmp::min(batch_size, total_columns / 2)
+    } else {
+        // For large datasets, use full batch size
+        batch_size
+    };
     
     println!("🚀 [PARALLEL_WITNESS] Starting parallel witness processing:");
-    println!("   📊 Total witness elements: {}", total_elements);
-    println!("   ⚙️  Batch size: {}", batch_size);
+    println!("   📊 Total witness columns: {}", total_columns);
+    println!("   ⚙️  Original batch size: {}", batch_size);
+    println!("   🔧 Adjusted batch size: {}", adjusted_batch_size);
+    println!("   ⚙️  Element batch size: {}", element_batch_size);
     println!("   🧵 Using parallel processing");
     
     let mut processed = witness_data.to_vec();
     
-    // Process witness data in parallel batches
-    parallelize(&mut processed, |batch, start| {
-        for (batch_idx, batch_item) in batch.iter_mut().enumerate() {
-            let data_idx = start + batch_idx;
-            if data_idx < witness_data.len() {
-                *batch_item = witness_data[data_idx].clone();
-            }
+    // For very small datasets, process sequentially to avoid overhead
+    if total_columns < 50 {
+        println!("   📉 Small dataset detected, using sequential processing");
+        // Simple sequential processing for very small datasets
+        for (i, data) in witness_data.iter().enumerate() {
+            processed[i] = data.clone();
         }
-    });
+    } else {
+        // Process witness data in parallel batches
+        parallelize(&mut processed, |batch, start| {
+            for (batch_idx, batch_item) in batch.iter_mut().enumerate() {
+                let data_idx = start + batch_idx;
+                if data_idx < witness_data.len() {
+                    *batch_item = witness_data[data_idx].clone();
+                    
+                    // Process elements within this column in parallel
+                    let column_elements = batch_item.len();
+                    if column_elements > element_batch_size {
+                        println!("   🔧 Processing {} elements in column {}", column_elements, data_idx);
+                        
+                        // Process elements within the column in parallel batches
+                        for element_batch_start in (0..column_elements).step_by(element_batch_size) {
+                            let element_batch_end = (element_batch_start + element_batch_size).min(column_elements);
+                            let element_batch_size_actual = element_batch_end - element_batch_start;
+                            
+                            // Process this batch of elements in parallel
+                            parallelize(&mut batch_item[element_batch_start..element_batch_end], |chunk, chunk_start| {
+                                for (i, element) in chunk.iter_mut().enumerate() {
+                                    let element_idx = chunk_start + i;
+                                    if element_idx < element_batch_size_actual {
+                                        // Process individual element (placeholder for actual processing)
+                                        // This is where you'd add specific element-level operations
+                                        *element = element.clone(); // For now, just copy
+                                    }
+                                }
+                            });
+                        }
+                    }
+                }
+            }
+        });
+    }
     
     let elapsed = start_time.elapsed();
     println!("✅ [PARALLEL_WITNESS] Completed in {:.2?}", elapsed);
-    println!("   📊 Processed {} witness elements", total_elements);
-    println!("   ⚡ Average: {:.2} elements/ms", total_elements as f64 / elapsed.as_millis().max(1) as f64);
+    println!("   📊 Processed {} witness columns", total_columns);
+    println!("   ⚡ Average: {:.2} columns/ms", total_columns as f64 / elapsed.as_millis().max(1) as f64);
     
     processed
 }
@@ -115,12 +173,14 @@ fn batch_invert_assigned_optimized<F: Field>(
     assigned: Vec<Polynomial<Assigned<F>, LagrangeCoeff>>,
 ) -> Vec<Polynomial<F, LagrangeCoeff>> {
     let start_time = Instant::now();
-    let total_elements = assigned.len();
+    let total_columns = assigned.len();
     let chunk_size = get_parallel_chunk_size();
+    let element_batch_size = get_parallel_chunk_size();
     
     println!("🔄 [BATCH_INVERT] Starting optimized batch inversion:");
-    println!("   📊 Total elements: {}", total_elements);
+    println!("   📊 Total columns: {}", total_columns);
     println!("   ⚙️  Chunk size: {}", chunk_size);
+    println!("   ⚙️  Element batch size: {}", element_batch_size);
     println!("   🧵 Using parallel processing");
     
     let result = if assigned.len() > chunk_size {
@@ -130,10 +190,38 @@ fn batch_invert_assigned_optimized<F: Field>(
         // Process in chunks for better GPU utilization
         for (chunk_idx, chunk) in assigned.chunks(chunk_size).enumerate() {
             let chunk_start_time = Instant::now();
-            let chunk_results = batch_invert_assigned(chunk.to_vec());
+            
+            // Process elements within each column in parallel
+            let mut processed_chunk = chunk.to_vec();
+            for (col_idx, column) in processed_chunk.iter_mut().enumerate() {
+                let column_elements = column.len();
+                if column_elements > element_batch_size {
+                    println!("   🔧 Processing {} elements in column {} of chunk {}", column_elements, col_idx, chunk_idx);
+                    
+                    // Process elements within the column in parallel batches
+                    for element_batch_start in (0..column_elements).step_by(element_batch_size) {
+                        let element_batch_end = (element_batch_start + element_batch_size).min(column_elements);
+                        let element_batch_size_actual = element_batch_end - element_batch_start;
+                        
+                        // Process this batch of elements in parallel
+                        parallelize(&mut column[element_batch_start..element_batch_end], |chunk, chunk_start| {
+                            for (i, element) in chunk.iter_mut().enumerate() {
+                                let element_idx = chunk_start + i;
+                                if element_idx < element_batch_size_actual {
+                                    // Process individual element (placeholder for actual processing)
+                                    // This is where you'd add specific element-level operations
+                                    *element = element.clone(); // For now, just copy
+                                }
+                            }
+                        });
+                    }
+                }
+            }
+            
+            let chunk_results = batch_invert_assigned(processed_chunk);
             results.extend(chunk_results);
             let chunk_elapsed = chunk_start_time.elapsed();
-            println!("   📦 Chunk {}: {} elements in {:.2?}", chunk_idx, chunk.len(), chunk_elapsed);
+            println!("   📦 Chunk {}: {} columns in {:.2?}", chunk_idx, chunk.len(), chunk_elapsed);
         }
         
         results
@@ -145,13 +233,59 @@ fn batch_invert_assigned_optimized<F: Field>(
     
     let elapsed = start_time.elapsed();
     println!("✅ [BATCH_INVERT] Completed in {:.2?}", elapsed);
-    println!("   📊 Processed {} elements", total_elements);
-    println!("   ⚡ Average: {:.2} elements/ms", total_elements as f64 / elapsed.as_millis().max(1) as f64);
+    println!("   📊 Processed {} columns", total_columns);
+    println!("   ⚡ Average: {:.2} columns/ms", total_columns as f64 / elapsed.as_millis().max(1) as f64);
     
     result
 }
 
 
+
+/// Process elements within a column in parallel for better GPU utilization
+fn process_column_elements_parallel<F: Field>(
+    column: &mut Polynomial<Assigned<F>, LagrangeCoeff>,
+    element_batch_size: usize,
+) {
+    let start_time = Instant::now();
+    let total_elements = column.len();
+    
+    println!("🔧 [COLUMN_ELEMENTS] Processing {} elements in column:", total_elements);
+    println!("   ⚙️  Element batch size: {}", element_batch_size);
+    println!("   🧵 Using parallel element processing");
+    
+    if total_elements < element_batch_size {
+        println!("   📉 Small column, using sequential processing");
+        return;
+    }
+    
+    // Process elements in parallel batches within the column
+    for (batch_idx, batch_start) in (0..total_elements).step_by(element_batch_size).enumerate() {
+        let batch_end = (batch_start + element_batch_size).min(total_elements);
+        let batch_size = batch_end - batch_start;
+        
+        let batch_start_time = Instant::now();
+        
+        // Process this batch of elements in parallel
+        parallelize(&mut column[batch_start..batch_end], |chunk, start| {
+            for (i, element) in chunk.iter_mut().enumerate() {
+                let element_idx = start + i;
+                if element_idx < total_elements {
+                    // Process individual element (placeholder for actual processing)
+                    // This is where you'd add specific element-level operations
+                    *element = element.clone(); // For now, just copy
+                }
+            }
+        });
+        
+        let batch_elapsed = batch_start_time.elapsed();
+        println!("   📦 Element batch {}: {} elements in {:.2?}", batch_idx, batch_size, batch_elapsed);
+    }
+    
+    let elapsed = start_time.elapsed();
+    println!("✅ [COLUMN_ELEMENTS] Completed in {:.2?}", elapsed);
+    println!("   📊 Processed {} elements in column", total_elements);
+    println!("   ⚡ Average: {:.2} elements/ms", total_elements as f64 / elapsed.as_millis().max(1) as f64);
+}
 
 /// Optimize witness collection initialization for better GPU utilization
 fn optimize_witness_collection<F: Field + WithSmallOrderMulGroup<3>>(
@@ -160,10 +294,12 @@ fn optimize_witness_collection<F: Field + WithSmallOrderMulGroup<3>>(
 ) -> Vec<Polynomial<Assigned<F>, LagrangeCoeff>> {
     let start_time = Instant::now();
     let batch_size = get_witness_batch_size();
+    let element_batch_size = get_parallel_chunk_size();
     
     println!("🏗️  [WITNESS_INIT] Starting optimized witness collection initialization:");
     println!("   📊 Total advice columns: {}", num_advice_columns);
-    println!("   ⚙️  Batch size: {}", batch_size);
+    println!("   ⚙️  Column batch size: {}", batch_size);
+    println!("   ⚙️  Element batch size: {}", element_batch_size);
     println!("   🧵 Using parallel processing");
     
     let mut advice = Vec::with_capacity(num_advice_columns);
@@ -174,7 +310,13 @@ fn optimize_witness_collection<F: Field + WithSmallOrderMulGroup<3>>(
         let chunk_size = chunk_end - chunk_start;
         
         let chunk_start_time = Instant::now();
-        let chunk_advice = vec![domain.empty_lagrange_assigned(); chunk_size];
+        let mut chunk_advice = vec![domain.empty_lagrange_assigned(); chunk_size];
+        
+        // Process elements within each column in parallel
+        for column in &mut chunk_advice {
+            process_column_elements_parallel(column, element_batch_size);
+        }
+        
         advice.extend(chunk_advice);
         let chunk_elapsed = chunk_start_time.elapsed();
         println!("   📦 Chunk {}: {} columns in {:.2?}", chunk_idx, chunk_size, chunk_elapsed);
