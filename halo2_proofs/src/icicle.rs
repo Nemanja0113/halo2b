@@ -39,37 +39,159 @@ fn repr_from_u32<C: CurveAffine>(u32_arr: &[u32; 8]) -> <C as CurveAffine>::Base
 
 fn icicle_scalars_from_c_scalars<G: PrimeField>(coeffs: &[G]) -> Vec<ScalarField> {
     let start_time = std::time::Instant::now();
-    let result = coeffs.par_iter().map(|coef| {
-        let repr: [u32; 8] = unsafe { mem::transmute_copy(&coef.to_repr()) };
-        ScalarField::from(repr)
-    }).collect();
+    
+    // Optimization 0: Check if zero-copy conversion is possible
+    let use_zero_copy = std::env::var("HALO2_ZERO_COPY_CONVERSION")
+        .unwrap_or_else(|_| "false".to_string())
+        .parse::<bool>()
+        .unwrap_or(false);
+    
+    if use_zero_copy && coeffs.len() > 10000 {
+        // Try zero-copy conversion for large datasets
+        if let Ok(result) = try_zero_copy_scalar_conversion(coeffs) {
+            let elapsed = start_time.elapsed();
+            println!("      🚀 Zero-copy scalar conversion: {} elements in {:.2?} ({:.2} elements/ms)", 
+                     coeffs.len(), elapsed, coeffs.len() as f64 / elapsed.as_millis().max(1) as f64);
+            return result;
+        }
+    }
+    
+    // Optimization 1: Pre-allocate vector with exact capacity
+    let mut result = Vec::with_capacity(coeffs.len());
+    
+    // Optimization 2: Use chunked processing for better cache locality
+    let chunk_size = std::env::var("HALO2_CONVERSION_CHUNK_SIZE")
+        .unwrap_or_else(|_| "8192".to_string())
+        .parse::<usize>()
+        .unwrap_or(8192);
+    
+    // Optimization 3: Use rayon's par_chunks for better parallelization
+    let chunks: Vec<_> = coeffs.par_chunks(chunk_size)
+        .map(|chunk| {
+            chunk.iter().map(|coef| {
+                let repr: [u32; 8] = unsafe { mem::transmute_copy(&coef.to_repr()) };
+                ScalarField::from(repr)
+            }).collect::<Vec<_>>()
+        })
+        .collect();
+    
+    // Optimization 4: Flatten results efficiently
+    for chunk in chunks {
+        result.extend(chunk);
+    }
+    
     let elapsed = start_time.elapsed();
     if coeffs.len() > 1000 {  // Only log for large operations
-        println!("      🔄 Scalar conversion: {} elements in {:.2?} ({:.2} elements/ms)", 
+        println!("      🔄 Optimized scalar conversion: {} elements in {:.2?} ({:.2} elements/ms)", 
                  coeffs.len(), elapsed, coeffs.len() as f64 / elapsed.as_millis().max(1) as f64);
     }
     result
 }
 
+// Optimization: Zero-copy conversion when possible
+fn try_zero_copy_scalar_conversion<G: PrimeField>(coeffs: &[G]) -> Result<Vec<ScalarField>, &'static str> {
+    // This is a placeholder for zero-copy conversion
+    // In practice, this would check if the memory layouts are compatible
+    // and perform a direct memory copy instead of element-by-element conversion
+    
+    // For now, we'll fall back to the optimized conversion
+    Err("Zero-copy not implemented for this field type")
+}
+
+// Optimization: Batch conversion for multiple operations
+pub fn batch_icicle_scalars_from_c_scalars<G: PrimeField>(
+    operations: &[&[G]]
+) -> Vec<Vec<ScalarField>> {
+    let start_time = std::time::Instant::now();
+    let total_elements: usize = operations.iter().map(|op| op.len()).sum();
+    
+    println!("🚀 [BATCH_CONVERSION] Starting batch scalar conversion:");
+    println!("   📊 Total operations: {}", operations.len());
+    println!("   📊 Total elements: {}", total_elements);
+    
+    // Use parallel processing for the batch
+    let results: Vec<Vec<ScalarField>> = operations.par_iter()
+        .map(|coeffs| icicle_scalars_from_c_scalars(coeffs))
+        .collect();
+    
+    let elapsed = start_time.elapsed();
+    println!("✅ [BATCH_CONVERSION] Batch conversion completed in {:.2?}", elapsed);
+    println!("   ⚡ Average: {:.2} operations/ms", 
+             operations.len() as f64 / elapsed.as_millis().max(1) as f64);
+    println!("   ⚡ Element throughput: {:.2} elements/ms", 
+             total_elements as f64 / elapsed.as_millis().max(1) as f64);
+    
+    results
+}
+
 fn c_scalars_from_icicle_scalars<G: PrimeField>(scalars: &[ScalarField]) -> Vec<G> {
-    scalars.par_iter().map(|scalar| {
-        let repr: G::Repr = unsafe { mem::transmute_copy(scalar) };
-        G::from_repr(repr).unwrap()
-    }).collect()
+    let start_time = std::time::Instant::now();
+    
+    // Optimization 1: Pre-allocate vector with exact capacity
+    let mut result = Vec::with_capacity(scalars.len());
+    
+    // Optimization 2: Use chunked processing for better cache locality
+    let chunk_size = std::env::var("HALO2_CONVERSION_CHUNK_SIZE")
+        .unwrap_or_else(|_| "8192".to_string())
+        .parse::<usize>()
+        .unwrap_or(8192);
+    
+    // Optimization 3: Use rayon's par_chunks for better parallelization
+    let chunks: Vec<_> = scalars.par_chunks(chunk_size)
+        .map(|chunk| {
+            chunk.iter().map(|scalar| {
+                let repr: G::Repr = unsafe { mem::transmute_copy(scalar) };
+                G::from_repr(repr).unwrap()
+            }).collect::<Vec<_>>()
+        })
+        .collect();
+    
+    // Optimization 4: Flatten results efficiently
+    for chunk in chunks {
+        result.extend(chunk);
+    }
+    
+    let elapsed = start_time.elapsed();
+    if scalars.len() > 1000 {  // Only log for large operations
+        println!("      🔄 Optimized reverse scalar conversion: {} elements in {:.2?} ({:.2} elements/ms)", 
+                 scalars.len(), elapsed, scalars.len() as f64 / elapsed.as_millis().max(1) as f64);
+    }
+    result
 }
 
 fn icicle_points_from_c<C: CurveAffine>(bases: &[C]) -> Vec<Affine<CurveCfg>> {
     let start_time = std::time::Instant::now();
-    let result = bases.par_iter().map(|p| {
-        let coordinates = p.coordinates().unwrap();
-        let x_repr: [u32; 8] = unsafe { mem::transmute_copy(&coordinates.x().to_repr()) };
-        let y_repr: [u32; 8] = unsafe { mem::transmute_copy(&coordinates.y().to_repr()) };
+    
+    // Optimization 1: Pre-allocate vector with exact capacity
+    let mut result = Vec::with_capacity(bases.len());
+    
+    // Optimization 2: Use chunked processing for better cache locality
+    let chunk_size = std::env::var("HALO2_CONVERSION_CHUNK_SIZE")
+        .unwrap_or_else(|_| "8192".to_string())
+        .parse::<usize>()
+        .unwrap_or(8192);
+    
+    // Optimization 3: Use rayon's par_chunks for better parallelization
+    let chunks: Vec<_> = bases.par_chunks(chunk_size)
+        .map(|chunk| {
+            chunk.iter().map(|p| {
+                let coordinates = p.coordinates().unwrap();
+                let x_repr: [u32; 8] = unsafe { mem::transmute_copy(&coordinates.x().to_repr()) };
+                let y_repr: [u32; 8] = unsafe { mem::transmute_copy(&coordinates.y().to_repr()) };
 
-        Affine::<CurveCfg>::from_limbs(x_repr, y_repr)
-    }).collect();
+                Affine::<CurveCfg>::from_limbs(x_repr, y_repr)
+            }).collect::<Vec<_>>()
+        })
+        .collect();
+    
+    // Optimization 4: Flatten results efficiently
+    for chunk in chunks {
+        result.extend(chunk);
+    }
+    
     let elapsed = start_time.elapsed();
     if bases.len() > 1000 {  // Only log for large operations
-        println!("      🔄 Point conversion: {} elements in {:.2?} ({:.2} elements/ms)", 
+        println!("      🔄 Optimized point conversion: {} elements in {:.2?} ({:.2} elements/ms)", 
                  bases.len(), elapsed, bases.len() as f64 / elapsed.as_millis().max(1) as f64);
     }
     result
@@ -306,12 +428,17 @@ pub fn fft_on_device<Scalar: ff::PrimeField, G: FftGroup<Scalar> + ff::PrimeFiel
     let omega_elapsed = omega_start.elapsed();
     println!("   ✅ Step 2 - Omega conversion & domain init: {:.2?}", omega_elapsed);
     
-    // Step 3: Convert scalars to GPU format
+    // Step 3: Convert scalars to GPU format (optimized)
     let scalar_start = std::time::Instant::now();
+    
+    // Use optimized conversion with configurable chunk size
     let mut icicle_scalars: Vec<ScalarField> = icicle_scalars_from_c_scalars(scalars);
+    
+    // Create GPU memory interface
     let host_scalars = HostSlice::from_mut_slice(&mut icicle_scalars);
+    
     let scalar_elapsed = scalar_start.elapsed();
-    println!("   ✅ Step 3 - Scalar conversion: {:.2?} ({:.2} elements/ms)", 
+    println!("   ✅ Step 3 - Optimized scalar conversion: {:.2?} ({:.2} elements/ms)", 
              scalar_elapsed, data_size as f64 / scalar_elapsed.as_millis().max(1) as f64);
     
     // Step 4: Execute GPU NTT
