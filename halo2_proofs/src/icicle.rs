@@ -208,7 +208,13 @@ pub fn batched_multiexp_on_device<C: CurveAffine>(
     let alloc_elapsed = alloc_start.elapsed();
     println!("   ✅ Step 4 - MSM configuration: {:.2?}", alloc_elapsed);
     
-    // Step 5: Process each operation
+    // Step 5: Initialize results array
+    let copy_start = std::time::Instant::now();
+    let mut msm_host_results = vec![G1Projective::zero(); operations.len()];
+    let copy_elapsed = copy_start.elapsed();
+    println!("   ✅ Step 5 - Results array initialization: {:.2?}", copy_elapsed);
+    
+    // Step 6: Process each operation
     let gpu_start = std::time::Instant::now();
     let mut offset_scalars = 0;
     let mut offset_bases = 0;
@@ -241,15 +247,10 @@ pub fn batched_multiexp_on_device<C: CurveAffine>(
         offset_scalars += size;
         offset_bases += size;
     }
-    let gpu_elapsed = gpu_start.elapsed();
-    println!("   ✅ Step 5 - GPU MSM computation: {:.2?} ({:.2} elements/ms)", 
-             gpu_elapsed, total_elements as f64 / gpu_elapsed.as_millis().max(1) as f64);
     
-    // Step 6: Initialize results array
-    let copy_start = std::time::Instant::now();
-    let mut msm_host_results = vec![G1Projective::zero(); operations.len()];
-    let copy_elapsed = copy_start.elapsed();
-    println!("   ✅ Step 6 - Results array initialization: {:.2?}", copy_elapsed);
+    let gpu_elapsed = gpu_start.elapsed();
+    println!("   ✅ Step 6 - GPU MSM computation: {:.2?} ({:.2} elements/ms)", 
+             gpu_elapsed, total_elements as f64 / gpu_elapsed.as_millis().max(1) as f64);
     
     // Step 7: Convert results back to Halo2 format
     let convert_start = std::time::Instant::now();
