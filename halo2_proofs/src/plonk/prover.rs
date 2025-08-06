@@ -278,7 +278,7 @@ fn process_column_elements_parallel<F: Field>(
         });
         
         let batch_elapsed = batch_start_time.elapsed();
-        println!("   📦 Element batch {}: {} elements in {:.2?}", batch_idx, batch_size, batch_elapsed);
+        // println!("   📦 Element batch {}: {} elements in {:.2?}", batch_idx, batch_size, batch_elapsed);
     }
     
     let elapsed = start_time.elapsed();

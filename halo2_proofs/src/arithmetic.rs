@@ -509,9 +509,30 @@ pub fn batched_msm_operations<C: CurveAffine>(
     println!("🚀 [BATCHED_MSM] Starting batched MSM operations:");
     println!("   📊 Total operations: {}", operations.len());
     println!("   📊 Total elements: {}", total_elements);
-    println!("   🧵 Using GPU acceleration");
     
-    // Process operations in parallel batches for better GPU utilization
+    #[cfg(feature = "icicle_gpu")]
+    {
+        let enable_gpu = env::var("ENABLE_ICICLE_GPU").is_ok();
+        let gpu_supported = operations.iter().any(|(coeffs, _)| {
+            coeffs.len() > 0 && icicle::is_gpu_supported_field(&coeffs[0])
+        });
+        
+        if enable_gpu && gpu_supported {
+            println!("   🚀 Using GPU batched MSM");
+            let results = icicle::batched_multiexp_on_device::<C>(operations);
+            
+            let elapsed = start_time.elapsed();
+            println!("✅ [BATCHED_MSM] GPU batched MSM completed in {:.2?}", elapsed);
+            println!("   ⚡ Average: {:.2} operations/ms", operations.len() as f64 / elapsed.as_millis().max(1) as f64);
+            
+            return results;
+        }
+    }
+    
+    // Fallback to CPU batched processing
+    println!("   💻 Using CPU batched MSM");
+    
+    // Process operations in parallel batches for better CPU utilization
     let batch_size = std::env::var("HALO2_MSM_BATCH_SIZE")
         .unwrap_or_else(|_| "4".to_string())
         .parse::<usize>()
@@ -524,7 +545,7 @@ pub fn batched_msm_operations<C: CurveAffine>(
         
         // Process each operation in the batch
         for (coeffs, bases) in batch {
-            let result = best_multiexp_gpu(coeffs, bases);
+            let result = best_multiexp_cpu(coeffs, bases);
             results.push(result);
         }
         
@@ -533,7 +554,7 @@ pub fn batched_msm_operations<C: CurveAffine>(
     }
     
     let elapsed = start_time.elapsed();
-    println!("✅ [BATCHED_MSM] Completed in {:.2?}", elapsed);
+    println!("✅ [BATCHED_MSM] CPU batched MSM completed in {:.2?}", elapsed);
     println!("   ⚡ Average: {:.2} operations/ms", operations.len() as f64 / elapsed.as_millis().max(1) as f64);
     
     results
