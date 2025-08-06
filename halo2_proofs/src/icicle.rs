@@ -202,12 +202,11 @@ pub fn batched_multiexp_on_device<C: CurveAffine>(
     println!("   ✅ Step 3 - Point conversion: {:.2?} ({:.2} elements/ms)", 
              point_elapsed, total_elements as f64 / point_elapsed.as_millis().max(1) as f64);
     
-    // Step 4: Allocate GPU memory for all results
+    // Step 4: Initialize MSM configuration
     let alloc_start = std::time::Instant::now();
-    let mut msm_results = DeviceVec::<G1Projective>::cuda_malloc(operations.len()).unwrap();
     let cfg = msm::MSMConfig::default();
     let alloc_elapsed = alloc_start.elapsed();
-    println!("   ✅ Step 4 - GPU memory allocation: {:.2?}", alloc_elapsed);
+    println!("   ✅ Step 4 - MSM configuration: {:.2?}", alloc_elapsed);
     
     // Step 5: Process each operation
     let gpu_start = std::time::Instant::now();
@@ -217,11 +216,23 @@ pub fn batched_multiexp_on_device<C: CurveAffine>(
     for (i, &size) in operation_sizes.iter().enumerate() {
         let op_start = std::time::Instant::now();
         
-        let coeffs_slice = coeffs.slice(offset_scalars..offset_scalars + size);
-        let bases_slice = bases.slice(offset_bases..offset_bases + size);
-        let result_slice = msm_results.slice_mut(i..i+1);
+        // Create slices using the correct API
+        let coeffs_slice = HostSlice::from_slice(&coeffs.as_slice()[offset_scalars..offset_scalars + size]);
+        let bases_slice = HostSlice::from_slice(&bases.as_slice()[offset_bases..offset_bases + size]);
         
-        msm::msm(coeffs_slice, bases_slice, &cfg, result_slice).unwrap();
+        // For single result, we need to create a new DeviceVec for each operation
+        let mut single_result = DeviceVec::<G1Projective>::cuda_malloc(1).unwrap();
+        
+        msm::msm(coeffs_slice, bases_slice, &cfg, &mut single_result[..]).unwrap();
+        
+        // Copy the single result to the appropriate position in the main results array
+        let mut host_result = vec![G1Projective::zero(); 1];
+        single_result
+            .copy_to_host(HostSlice::from_mut_slice(&mut host_result[..]))
+            .unwrap();
+        
+        // Store in the main results array
+        msm_host_results[i] = host_result[0];
         
         let op_elapsed = op_start.elapsed();
         println!("      📦 Operation {}: {} elements in {:.2?} ({:.2} elements/ms)", 
@@ -234,14 +245,11 @@ pub fn batched_multiexp_on_device<C: CurveAffine>(
     println!("   ✅ Step 5 - GPU MSM computation: {:.2?} ({:.2} elements/ms)", 
              gpu_elapsed, total_elements as f64 / gpu_elapsed.as_millis().max(1) as f64);
     
-    // Step 6: Copy all results back to CPU
+    // Step 6: Initialize results array
     let copy_start = std::time::Instant::now();
     let mut msm_host_results = vec![G1Projective::zero(); operations.len()];
-    msm_results
-        .copy_to_host(HostSlice::from_mut_slice(&mut msm_host_results[..]))
-        .unwrap();
     let copy_elapsed = copy_start.elapsed();
-    println!("   ✅ Step 6 - GPU to CPU copy: {:.2?}", copy_elapsed);
+    println!("   ✅ Step 6 - Results array initialization: {:.2?}", copy_elapsed);
     
     // Step 7: Convert results back to Halo2 format
     let convert_start = std::time::Instant::now();

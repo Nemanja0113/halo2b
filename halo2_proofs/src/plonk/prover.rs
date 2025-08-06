@@ -259,11 +259,11 @@ fn process_column_elements_parallel<F: Field>(
     }
     
     // Process elements in parallel batches within the column
-    for (batch_idx, batch_start) in (0..total_elements).step_by(element_batch_size).enumerate() {
+    for (_batch_idx, batch_start) in (0..total_elements).step_by(element_batch_size).enumerate() {
         let batch_end = (batch_start + element_batch_size).min(total_elements);
-        let batch_size = batch_end - batch_start;
+        let _batch_size = batch_end - batch_start;
         
-        let batch_start_time = Instant::now();
+        let _batch_start_time = Instant::now();
         
         // Process this batch of elements in parallel
         parallelize(&mut column[batch_start..batch_end], |chunk, start| {
@@ -277,8 +277,8 @@ fn process_column_elements_parallel<F: Field>(
             }
         });
         
-        let batch_elapsed = batch_start_time.elapsed();
-        // println!("   📦 Element batch {}: {} elements in {:.2?}", batch_idx, batch_size, batch_elapsed);
+        let _batch_elapsed = _batch_start_time.elapsed();
+        // println!("   📦 Element batch {}: {} elements in {:.2?}", _batch_idx, _batch_size, _batch_elapsed);
     }
     
     let elapsed = start_time.elapsed();
