@@ -86,7 +86,25 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
 ///
 /// This will use multithreading if beneficial.
 pub fn best_multiexp_cpu<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
-    msm_best(coeffs, bases)
+    let start_time = std::time::Instant::now();
+    let data_size = coeffs.len();
+    
+    println!("🖥️  [CPU_MSM] Starting CPU MSM operation:");
+    println!("   📊 Data size: {} elements", data_size);
+    println!("   🧵 Using CPU parallel processing");
+    
+    let msm_start = std::time::Instant::now();
+    let result = msm_best(coeffs, bases);
+    let msm_elapsed = msm_start.elapsed();
+    
+    let total_elapsed = start_time.elapsed();
+    println!("✅ [CPU_MSM] CPU MSM completed in {:.2?}", total_elapsed);
+    println!("   ⚡ MSM computation: {:.2?} ({:.2} elements/ms)", 
+             msm_elapsed, data_size as f64 / msm_elapsed.as_millis().max(1) as f64);
+    println!("   ⚡ Total throughput: {:.2} elements/ms", 
+             data_size as f64 / total_elapsed.as_millis().max(1) as f64);
+    
+    result
 }
 
 #[cfg(feature = "icicle_gpu")]
@@ -115,7 +133,24 @@ pub fn best_fft_cpu<Scalar: Field, G: FftGroup<Scalar>>(
     data: &FFTData<Scalar>,
     inverse: bool,
 ) {
+    let start_time = std::time::Instant::now();
+    let data_size = a.len();
+    
+    println!("🖥️  [CPU_FFT] Starting CPU FFT operation:");
+    println!("   📊 Data size: {} elements", data_size);
+    println!("   ⚙️  Log_n: {}", log_n);
+    println!("   🔄 Inverse: {}", inverse);
+    
+    let fft_start = std::time::Instant::now();
     fft::fft(a, omega, log_n, data, inverse);
+    let fft_elapsed = fft_start.elapsed();
+    
+    let total_elapsed = start_time.elapsed();
+    println!("✅ [CPU_FFT] CPU FFT completed in {:.2?}", total_elapsed);
+    println!("   ⚡ FFT computation: {:.2?} ({:.2} elements/ms)", 
+             fft_elapsed, data_size as f64 / fft_elapsed.as_millis().max(1) as f64);
+    println!("   ⚡ Total throughput: {:.2} elements/ms", 
+             data_size as f64 / total_elapsed.as_millis().max(1) as f64);
 }
 
 /// Best FFT
@@ -175,24 +210,48 @@ pub fn best_fft_gpu<Scalar: Field + ff::PrimeField, G: FftGroup<Scalar> + ff::Pr
 
 /// Convert coefficient bases group elements to lagrange basis by inverse FFT.
 pub fn g_to_lagrange<C: PrimeCurveAffine>(g_projective: Vec<C::Curve>, k: u32) -> Vec<C> {
+    let start_time = std::time::Instant::now();
+    let data_size = g_projective.len();
+    
+    println!("🖥️  [G_TO_LAGRANGE] Starting g_to_lagrange operation:");
+    println!("   📊 Data size: {} elements", data_size);
+    println!("   ⚙️  K: {}", k);
+    println!("   🧵 Using CPU processing (curve points)");
+    
+    // Step 1: Setup phase
+    let setup_start = std::time::Instant::now();
     let n_inv = C::Scalar::TWO_INV.pow_vartime([k as u64, 0, 0, 0]);
     let omega = C::Scalar::ROOT_OF_UNITY;
     let mut omega_inv = C::Scalar::ROOT_OF_UNITY_INV;
     for _ in k..C::Scalar::S {
         omega_inv = omega_inv.square();
     }
-
+    let setup_elapsed = setup_start.elapsed();
+    println!("   ✅ Step 1 - Setup: {:.2?}", setup_elapsed);
+    
+    // Step 2: FFT computation
+    let fft_start = std::time::Instant::now();
     let mut g_lagrange_projective = g_projective;
     let n = g_lagrange_projective.len();
     let fft_data = FFTData::new(n, omega, omega_inv);
-
-            best_fft_cpu(&mut g_lagrange_projective, omega_inv, k, &fft_data, true);
+    best_fft_cpu(&mut g_lagrange_projective, omega_inv, k, &fft_data, true);
+    let fft_elapsed = fft_start.elapsed();
+    println!("   ✅ Step 2 - FFT computation: {:.2?} ({:.2} elements/ms)", 
+             fft_elapsed, data_size as f64 / fft_elapsed.as_millis().max(1) as f64);
+    
+    // Step 3: Scalar multiplication
+    let scalar_start = std::time::Instant::now();
     parallelize(&mut g_lagrange_projective, |g, _| {
         for g in g.iter_mut() {
             *g *= n_inv;
         }
     });
-
+    let scalar_elapsed = scalar_start.elapsed();
+    println!("   ✅ Step 3 - Scalar multiplication: {:.2?} ({:.2} elements/ms)", 
+             scalar_elapsed, data_size as f64 / scalar_elapsed.as_millis().max(1) as f64);
+    
+    // Step 4: Batch normalization
+    let norm_start = std::time::Instant::now();
     let mut g_lagrange = vec![C::identity(); 1 << k];
     parallelize(&mut g_lagrange, |g_lagrange, starts| {
         C::Curve::batch_normalize(
@@ -200,7 +259,24 @@ pub fn g_to_lagrange<C: PrimeCurveAffine>(g_projective: Vec<C::Curve>, k: u32) -
             g_lagrange,
         );
     });
-
+    let norm_elapsed = norm_start.elapsed();
+    println!("   ✅ Step 4 - Batch normalization: {:.2?} ({:.2} elements/ms)", 
+             norm_elapsed, data_size as f64 / norm_elapsed.as_millis().max(1) as f64);
+    
+    let total_elapsed = start_time.elapsed();
+    println!("✅ [G_TO_LAGRANGE] g_to_lagrange completed in {:.2?}", total_elapsed);
+    println!("   ⚡ Total throughput: {:.2} elements/ms", 
+             data_size as f64 / total_elapsed.as_millis().max(1) as f64);
+    println!("   📊 Breakdown:");
+    println!("      - Setup: {:.1}%", 
+             setup_elapsed.as_millis() as f64 / total_elapsed.as_millis() as f64 * 100.0);
+    println!("      - FFT computation: {:.1}%", 
+             fft_elapsed.as_millis() as f64 / total_elapsed.as_millis() as f64 * 100.0);
+    println!("      - Scalar multiplication: {:.1}%", 
+             scalar_elapsed.as_millis() as f64 / total_elapsed.as_millis() as f64 * 100.0);
+    println!("      - Batch normalization: {:.1}%", 
+             norm_elapsed.as_millis() as f64 / total_elapsed.as_millis() as f64 * 100.0);
+    
     g_lagrange
 }
 /// This evaluates a provided polynomial (in coefficient form) at `point`.
@@ -469,9 +545,46 @@ pub fn batched_fft_operations<Scalar: Field + ff::PrimeField, G: FftGroup<Scalar
     println!("🚀 [BATCHED_FFT] Starting batched FFT operations:");
     println!("   📊 Total operations: {}", operations.len());
     println!("   📊 Total elements: {}", total_elements);
-    println!("   🧵 Using GPU acceleration");
     
-    // Process operations in parallel batches for better GPU utilization
+    #[cfg(feature = "icicle_gpu")]
+    {
+        let enable_gpu = env::var("ENABLE_ICICLE_GPU").is_ok();
+        let gpu_supported = operations.iter().any(|(data, omega, _, _)| {
+            data.len() > 0 && icicle::is_gpu_supported_field(omega)
+        });
+        
+        if enable_gpu && gpu_supported {
+            println!("   🚀 Using GPU batched FFT");
+            
+            // Process operations in parallel batches for better GPU utilization
+            let batch_size = std::env::var("HALO2_FFT_BATCH_SIZE")
+                .unwrap_or_else(|_| "4".to_string())
+                .parse::<usize>()
+                .unwrap_or(4);
+            
+            for (batch_idx, batch) in operations.chunks_mut(batch_size).enumerate() {
+                let batch_start = std::time::Instant::now();
+                
+                // Process each operation in the batch
+                for (data, omega, log_n, inverse) in batch.iter_mut() {
+                    best_fft_gpu(*data, *omega, *log_n, *inverse);
+                }
+                
+                let batch_elapsed = batch_start.elapsed();
+                println!("   📦 GPU FFT batch {}: {} operations in {:.2?}", batch_idx, batch.len(), batch_elapsed);
+            }
+            
+            let elapsed = start_time.elapsed();
+            println!("✅ [BATCHED_FFT] GPU batched FFT completed in {:.2?}", elapsed);
+            println!("   ⚡ Average: {:.2} operations/ms", operations.len() as f64 / elapsed.as_millis().max(1) as f64);
+            return;
+        }
+    }
+    
+    // Fallback to CPU batched processing
+    println!("   💻 Using CPU batched FFT");
+    
+    // Process operations in parallel batches for better CPU utilization
     let batch_size = std::env::var("HALO2_FFT_BATCH_SIZE")
         .unwrap_or_else(|_| "4".to_string())
         .parse::<usize>()
@@ -482,15 +595,16 @@ pub fn batched_fft_operations<Scalar: Field + ff::PrimeField, G: FftGroup<Scalar
         
         // Process each operation in the batch
         for (data, omega, log_n, inverse) in batch.iter_mut() {
-            best_fft_gpu(*data, *omega, *log_n, *inverse);
+            let fft_data = FFTData::new(data.len(), *omega, omega.invert().unwrap());
+            best_fft_cpu(*data, *omega, *log_n, &fft_data, *inverse);
         }
         
         let batch_elapsed = batch_start.elapsed();
-        println!("   📦 FFT batch {}: {} operations in {:.2?}", batch_idx, batch.len(), batch_elapsed);
+        println!("   📦 CPU FFT batch {}: {} operations in {:.2?}", batch_idx, batch.len(), batch_elapsed);
     }
     
     let elapsed = start_time.elapsed();
-    println!("✅ [BATCHED_FFT] Completed in {:.2?}", elapsed);
+    println!("✅ [BATCHED_FFT] CPU batched FFT completed in {:.2?}", elapsed);
     println!("   ⚡ Average: {:.2} operations/ms", operations.len() as f64 / elapsed.as_millis().max(1) as f64);
 }
 
