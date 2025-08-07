@@ -12,6 +12,7 @@ use icicle_core::{
 };
 use maybe_rayon::iter::IntoParallelRefIterator;
 use maybe_rayon::iter::ParallelIterator;
+use maybe_rayon::prelude::ParallelSlice;
 use std::{env, mem};
 
 pub fn should_use_cpu_msm(size: usize) -> bool {
