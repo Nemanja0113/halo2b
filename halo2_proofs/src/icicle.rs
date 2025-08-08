@@ -219,6 +219,58 @@ pub fn multiexp_on_device<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> 
     
     println!("🚀 [GPU_MSM] Starting GPU MSM operation:");
     println!("   📊 Data size: {} elements", data_size);
+    // Input buffer diagnostics (CPU)
+    println!(
+        "   🧠 Scalars buffer: len={} | type={} | location=CPU (&[..])",
+        coeffs.len(),
+        std::any::type_name::<C::Scalar>()
+    );
+    println!(
+        "   🧠 Bases   buffer: len={} | type={} | location=CPU (&[..])",
+        bases.len(),
+        std::any::type_name::<C>()
+    );
+
+    // Optional: compute lightweight fingerprints to confirm data identity across calls
+    if std::env::var("HALO2_MSM_FINGERPRINT").ok().as_deref() == Some("1") {
+        use ff::PrimeField;
+        use std::hash::{Hash, Hasher};
+        use std::collections::hash_map::DefaultHasher;
+
+        let sample_stride = (data_size / 65536).max(1); // sample up to ~65k elements
+
+        let mut scalar_hasher = DefaultHasher::new();
+        let mut sampled_scalars = 0usize;
+        for (idx, s) in coeffs.iter().enumerate().step_by(sample_stride) {
+            let repr = s.to_repr();
+            repr.as_ref().hash(&mut scalar_hasher);
+            sampled_scalars += 1;
+        }
+        let scalar_fp = scalar_hasher.finish();
+
+        let mut point_hasher = DefaultHasher::new();
+        let mut sampled_points = 0usize;
+        for (idx, p) in bases.iter().enumerate().step_by(sample_stride) {
+            if let Some(coords) = p.coordinates() {
+                coords.x().to_repr().as_ref().hash(&mut point_hasher);
+                coords.y().to_repr().as_ref().hash(&mut point_hasher);
+            } else {
+                // Point at infinity marker
+                0xFFFFu16.hash(&mut point_hasher);
+            }
+            sampled_points += 1;
+        }
+        let point_fp = point_hasher.finish();
+
+        println!(
+            "   🧪 Scalars fingerprint: 0x{:016x} | sampled={} stride={} (HALO2_MSM_FINGERPRINT=1)",
+            scalar_fp, sampled_scalars, sample_stride
+        );
+        println!(
+            "   🧪 Bases   fingerprint: 0x{:016x} | sampled={} stride={} (HALO2_MSM_FINGERPRINT=1)",
+            point_fp, sampled_points, sample_stride
+        );
+    }
     
     // Step 1: Convert scalars to GPU format
     let scalar_start = std::time::Instant::now();
@@ -227,6 +279,10 @@ pub fn multiexp_on_device<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> 
     let scalar_elapsed = scalar_start.elapsed();
     println!("   ✅ Step 1 - Scalar conversion: {:.2?} ({:.2} elements/ms)", 
              scalar_elapsed, data_size as f64 / scalar_elapsed.as_millis().max(1) as f64);
+    println!(
+        "   🔎 Scalars staging: len={} | kind=Icicle HostSlice | location=CPU (staging)",
+        binding.len()
+    );
     
     // Step 2: Convert points to GPU format
     let point_start = std::time::Instant::now();
@@ -235,6 +291,10 @@ pub fn multiexp_on_device<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> 
     let point_elapsed = point_start.elapsed();
     println!("   ✅ Step 2 - Point conversion: {:.2?} ({:.2} elements/ms)", 
              point_elapsed, data_size as f64 / point_elapsed.as_millis().max(1) as f64);
+    println!(
+        "   🔎 Points  staging: len={} | kind=Icicle HostSlice | location=CPU (staging)",
+        binding.len()
+    );
     
     // Step 3: Allocate GPU memory
     let alloc_start = std::time::Instant::now();
@@ -242,6 +302,10 @@ pub fn multiexp_on_device<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> 
     let cfg = msm::MSMConfig::default();
     let alloc_elapsed = alloc_start.elapsed();
     println!("   ✅ Step 3 - GPU memory allocation: {:.2?}", alloc_elapsed);
+    println!(
+        "   🔎 Results buffer: len={} | kind=Icicle DeviceVec<G1Projective> | location=GPU",
+        1
+    );
     
     // Step 4: Execute GPU MSM
     let gpu_start = std::time::Instant::now();
@@ -258,12 +322,21 @@ pub fn multiexp_on_device<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> 
         .unwrap();
     let copy_elapsed = copy_start.elapsed();
     println!("   ✅ Step 5 - GPU to CPU copy: {:.2?}", copy_elapsed);
+    println!(
+        "   🔎 Results host  : len={} | type={} | location=CPU (Vec)",
+        msm_host_result.len(),
+        std::any::type_name::<G1Projective>()
+    );
     
     // Step 6: Convert result back to Halo2 format
     let convert_start = std::time::Instant::now();
     let msm_point = c_from_icicle_point::<C>(&msm_host_result[0]);
     let convert_elapsed = convert_start.elapsed();
     println!("   ✅ Step 6 - Result conversion: {:.2?}", convert_elapsed);
+    println!(
+        "   🔎 Return type   : {} | location=CPU",
+        std::any::type_name::<C::Curve>()
+    );
     
     let total_elapsed = start_time.elapsed();
     println!("✅ [GPU_MSM] GPU MSM completed in {:.2?}", total_elapsed);
