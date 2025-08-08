@@ -30,7 +30,7 @@ use lazy_static::lazy_static;
 
 // CPU Staging Buffers for Data Conversion (Real Bottleneck #1)
 lazy_static! {
-    static ref CPU_STAGING_BUFFERS: Mutex<HashMap<usize, Vec<u8>>> = Mutex::new(HashMap::new());
+    static ref CPU_STAGING_BUFFERS: Mutex<HashMap<usize, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
     static ref STREAM_COUNTER: AtomicUsize = AtomicUsize::new(0);
 }
 
@@ -38,14 +38,15 @@ lazy_static! {
 fn get_cpu_staging_buffer(size: usize) -> Vec<u8> {
     let mut buffers = CPU_STAGING_BUFFERS.lock().unwrap();
     
-    if let Some(buffer) = buffers.remove(&size) {
-        // Reuse existing buffer
-        buffer
-    } else {
-        // Create new buffer with padding for alignment
-        let aligned_size = ((size + 63) / 64) * 64; // 64-byte alignment
-        vec![0u8; aligned_size]
+    if let Some(buffer_list) = buffers.get_mut(&size) {
+        if let Some(buffer) = buffer_list.pop() {
+            return buffer; // Reuse existing buffer
+        }
     }
+    
+    // Create new buffer with padding for alignment
+    let aligned_size = ((size + 63) / 64) * 64; // 64-byte alignment
+    vec![0u8; aligned_size]
 }
 
 /// Return CPU staging buffer to pool
@@ -210,8 +211,8 @@ fn execute_gpu_msm_with_streams<C: CurveAffine>(
     stream_cfg.ctx.stream = &stream;
     stream_cfg.is_async = true;
     
-    // Execute MSM with stream
-    msm::msm(&coeffs_device, &bases_device, &stream_cfg, &mut result[..]).unwrap();
+    // Execute MSM with stream - use DeviceSlice for MSM
+    msm::msm(&coeffs_device.as_slice(), &bases_device.as_slice(), &stream_cfg, &mut result.as_mut_slice()).unwrap();
     
     // Copy result back with stream
     let mut host_result = vec![G1Projective::zero(); 1];
@@ -245,7 +246,7 @@ fn optimize_batch_processing<C: CurveAffine>(
             // Use optimized conversion and GPU execution
             let (scalars, points) = optimize_memory_bandwidth(coeffs, bases);
             let cfg = get_optimized_msm_config(coeffs.len());
-            let gpu_result = execute_gpu_msm_with_streams(&scalars, &points, &cfg);
+            let gpu_result = execute_gpu_msm_with_streams::<C>(&scalars, &points, &cfg);
             c_from_icicle_point::<C>(&gpu_result)
         })
         .collect();
@@ -608,7 +609,7 @@ pub fn multiexp_on_device<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> 
     // REAL BOTTLENECK SOLUTION #2: GPU MSM computation with stream management
     let gpu_start = std::time::Instant::now();
     let msm_config = get_optimized_msm_config(data_size);
-    let gpu_result = execute_gpu_msm_with_streams(&scalars, &points, &msm_config);
+    let gpu_result = execute_gpu_msm_with_streams::<C>(&scalars, &points, &msm_config);
     let gpu_elapsed = gpu_start.elapsed();
     println!("   ✅ Step 2 - REAL OPTIMIZED GPU MSM computation: {:.2?} ({:.2} elements/ms)", 
              gpu_elapsed, data_size as f64 / gpu_elapsed.as_millis().max(1) as f64);
