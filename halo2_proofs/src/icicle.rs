@@ -198,8 +198,8 @@ fn execute_gpu_msm_with_streams<C: CurveAffine>(
     let stream = get_gpu_stream();
     
     // Create device vectors
-    let coeffs_device = DeviceVec::<ScalarField>::cuda_malloc(coeffs.len()).unwrap();
-    let bases_device = DeviceVec::<Affine<CurveCfg>>::cuda_malloc(bases.len()).unwrap();
+    let mut coeffs_device = DeviceVec::<ScalarField>::cuda_malloc(coeffs.len()).unwrap();
+    let mut bases_device = DeviceVec::<Affine<CurveCfg>>::cuda_malloc(bases.len()).unwrap();
     let mut result = DeviceVec::<G1Projective>::cuda_malloc(1).unwrap();
     
     // Copy data to GPU with stream
