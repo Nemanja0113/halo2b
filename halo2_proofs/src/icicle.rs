@@ -122,19 +122,18 @@ fn optimize_memory_bandwidth<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) 
     let scalar_buffer = get_cpu_staging_buffer(coeffs.len() * 32); // 32 bytes per scalar
     let point_buffer = get_cpu_staging_buffer(bases.len() * 64);   // 64 bytes per point
     
-    // Parallel conversion with staging buffers
-    let (scalars, points) = rayon::join(
-        || {
-            let result = simd_scalar_conversion(coeffs);
-            return_cpu_staging_buffer(scalar_buffer);
-            result
-        },
-        || {
-            let result = simd_point_conversion(bases);
-            return_cpu_staging_buffer(point_buffer);
-            result
-        }
-    );
+    // Sequential conversion with staging buffers (simplified without rayon)
+    let scalars = {
+        let result = simd_scalar_conversion(coeffs);
+        return_cpu_staging_buffer(scalar_buffer);
+        result
+    };
+    
+    let points = {
+        let result = simd_point_conversion(bases);
+        return_cpu_staging_buffer(point_buffer);
+        result
+    };
     
     let elapsed = start_time.elapsed();
     if coeffs.len() > 10000 {
@@ -237,22 +236,16 @@ fn optimize_batch_processing<C: CurveAffine>(
     println!("   📊 Batch size: {} operations", operations.len());
     println!("   📊 Total elements: {} elements", total_elements);
     
-    // Use multiple GPU streams for parallel processing
-    let num_streams = std::env::var("HALO2_NUM_STREAMS")
-        .unwrap_or_else(|_| "4".to_string())
-        .parse::<usize>()
-        .unwrap_or(4)
-        .min(operations.len());
+    // Process operations sequentially (simplified without rayon)
+    // Note: Each operation still uses its own GPU stream for async operations
     
-    let results: Vec<C::Curve> = operations.par_chunks((operations.len() + num_streams - 1) / num_streams)
-        .flat_map(|chunk| {
-            chunk.iter().map(|(coeffs, bases)| {
-                // Use optimized conversion and GPU execution
-                let (scalars, points) = optimize_memory_bandwidth(coeffs, bases);
-                let cfg = get_optimized_msm_config(coeffs.len());
-                let gpu_result = execute_gpu_msm_with_streams(&scalars, &points, &cfg);
-                c_from_icicle_point::<C>(&gpu_result)
-            }).collect::<Vec<_>>()
+    let results: Vec<C::Curve> = operations.iter()
+        .map(|(coeffs, bases)| {
+            // Use optimized conversion and GPU execution
+            let (scalars, points) = optimize_memory_bandwidth(coeffs, bases);
+            let cfg = get_optimized_msm_config(coeffs.len());
+            let gpu_result = execute_gpu_msm_with_streams(&scalars, &points, &cfg);
+            c_from_icicle_point::<C>(&gpu_result)
         })
         .collect();
     
