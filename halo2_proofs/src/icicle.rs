@@ -31,7 +31,6 @@ use lazy_static::lazy_static;
 // CPU Staging Buffers for Data Conversion (Real Bottleneck #1)
 lazy_static! {
     static ref CPU_STAGING_BUFFERS: Mutex<HashMap<usize, Vec<u8>>> = Mutex::new(HashMap::new());
-    static ref GPU_STREAMS: Mutex<HashMap<u32, CudaStream>> = Mutex::new(HashMap::new());
     static ref STREAM_COUNTER: AtomicUsize = AtomicUsize::new(0);
 }
 
@@ -62,25 +61,16 @@ fn return_cpu_staging_buffer(buffer: Vec<u8>) {
 
 /// Get or create GPU stream for parallel operations
 fn get_gpu_stream() -> CudaStream {
-    let stream_id = STREAM_COUNTER.fetch_add(1, Ordering::Relaxed) as u32;
-    let mut streams = GPU_STREAMS.lock().unwrap();
-    
-    if let Some(stream) = streams.remove(&stream_id) {
-        stream
-    } else {
-        // Create new stream
-        CudaStream::create().unwrap()
-    }
+    // Create new stream on demand (simplified approach)
+    // Note: In a production environment, you might want to implement a more sophisticated
+    // stream pool that doesn't require Send trait
+    CudaStream::create().unwrap()
 }
 
-/// Return GPU stream to pool
-fn return_gpu_stream(stream: CudaStream) {
-    let mut streams = GPU_STREAMS.lock().unwrap();
-    let stream_id = STREAM_COUNTER.fetch_sub(1, Ordering::Relaxed) as u32;
-    
-    if streams.len() < 8 { // Keep max 8 streams
-        streams.insert(stream_id, stream);
-    }
+/// Return GPU stream to pool (simplified - just let it drop)
+fn return_gpu_stream(_stream: CudaStream) {
+    // Stream will be automatically destroyed when dropped
+    // This is a simplified approach to avoid Send trait issues
 }
 
 // SIMD-Optimized Data Conversion (Real Bottleneck #2)
