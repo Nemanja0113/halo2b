@@ -54,8 +54,9 @@ fn return_cpu_staging_buffer(buffer: Vec<u8>) {
     let mut buffers = CPU_STAGING_BUFFERS.lock().unwrap();
     
     // Keep only a reasonable number of buffers per size
-    if buffers.entry(size).or_insert_with(Vec::new).len() < 4 {
-        buffers.get_mut(&size).unwrap().push(buffer);
+    let buffer_list = buffers.entry(size).or_insert_with(Vec::new);
+    if buffer_list.len() < 4 {
+        buffer_list.push(buffer);
     }
 }
 
