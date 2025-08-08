@@ -2,7 +2,8 @@ use group::ff::PrimeField;
 use icicle_bn254::curve::{CurveCfg, G1Projective, ScalarField};
 use halo2curves::bn256::Fr as Bn256Fr;
 use icicle_cuda_runtime::memory::{DeviceVec, HostSlice};
-use icicle_cuda_runtime::stream::IcicleStream;
+use icicle_cuda_runtime::stream::CudaStream;
+use icicle_core::msm::MSMConfig;
 use crate::arithmetic::FftGroup;
 use std::any::{TypeId, Any};
 pub use halo2curves::CurveAffine;
@@ -30,7 +31,7 @@ use lazy_static::lazy_static;
 // CPU Staging Buffers for Data Conversion (Real Bottleneck #1)
 lazy_static! {
     static ref CPU_STAGING_BUFFERS: Mutex<HashMap<usize, Vec<u8>>> = Mutex::new(HashMap::new());
-    static ref GPU_STREAMS: Mutex<HashMap<u32, icicle_cuda_runtime::stream::IcicleStream>> = Mutex::new(HashMap::new());
+    static ref GPU_STREAMS: Mutex<HashMap<u32, CudaStream>> = Mutex::new(HashMap::new());
     static ref STREAM_COUNTER: AtomicUsize = AtomicUsize::new(0);
 }
 
@@ -60,7 +61,7 @@ fn return_cpu_staging_buffer(buffer: Vec<u8>) {
 }
 
 /// Get or create GPU stream for parallel operations
-fn get_gpu_stream() -> icicle_cuda_runtime::stream::IcicleStream {
+fn get_gpu_stream() -> CudaStream {
     let stream_id = STREAM_COUNTER.fetch_add(1, Ordering::Relaxed) as u32;
     let mut streams = GPU_STREAMS.lock().unwrap();
     
@@ -68,12 +69,12 @@ fn get_gpu_stream() -> icicle_cuda_runtime::stream::IcicleStream {
         stream
     } else {
         // Create new stream
-        icicle_cuda_runtime::stream::IcicleStream::create().unwrap()
+        CudaStream::create().unwrap()
     }
 }
 
 /// Return GPU stream to pool
-fn return_gpu_stream(stream: icicle_cuda_runtime::stream::IcicleStream) {
+fn return_gpu_stream(stream: CudaStream) {
     let mut streams = GPU_STREAMS.lock().unwrap();
     let stream_id = STREAM_COUNTER.fetch_sub(1, Ordering::Relaxed) as u32;
     
@@ -201,7 +202,7 @@ fn simd_point_conversion<C: CurveAffine>(bases: &[C]) -> Vec<Affine<CurveCfg>> {
 fn execute_gpu_msm_with_streams<C: CurveAffine>(
     coeffs: &[ScalarField], 
     bases: &[Affine<CurveCfg>], 
-    cfg: &msm::MSMConfig
+    cfg: &MSMConfig
 ) -> G1Projective {
     let stream = get_gpu_stream();
     
@@ -216,7 +217,7 @@ fn execute_gpu_msm_with_streams<C: CurveAffine>(
     
     // Create MSM config with stream
     let mut stream_cfg = cfg.clone();
-    stream_cfg.stream_handle = stream.handle;
+    stream_cfg.ctx.stream = &stream;
     stream_cfg.is_async = true;
     
     // Execute MSM with stream
@@ -623,8 +624,6 @@ pub fn multiexp_on_device<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> 
     // REAL BOTTLENECK SOLUTION #2: GPU MSM computation with stream management
     let gpu_start = std::time::Instant::now();
     let msm_config = get_optimized_msm_config(data_size);
-    let coeffs_host = HostSlice::from_slice(&scalars[..]);
-    let bases_host = HostSlice::from_slice(&points[..]);
     let gpu_result = execute_gpu_msm_with_streams(&scalars, &points, &msm_config);
     let gpu_elapsed = gpu_start.elapsed();
     println!("   ✅ Step 2 - REAL OPTIMIZED GPU MSM computation: {:.2?} ({:.2} elements/ms)", 
