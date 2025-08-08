@@ -251,7 +251,9 @@ pub fn multiexp_on_device<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> 
         let mut point_hasher = DefaultHasher::new();
         let mut sampled_points = 0usize;
         for (idx, p) in bases.iter().enumerate().step_by(sample_stride) {
-            if let Some(coords) = p.coordinates().into() {
+            let coords_opt = p.coordinates();
+            if coords_opt.is_some().into() {
+                let coords = coords_opt.unwrap();
                 coords.x().to_repr().as_ref().hash(&mut point_hasher);
                 coords.y().to_repr().as_ref().hash(&mut point_hasher);
             } else {
