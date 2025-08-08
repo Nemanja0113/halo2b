@@ -211,8 +211,8 @@ fn execute_gpu_msm_with_streams<C: CurveAffine>(
     stream_cfg.ctx.stream = &stream;
     stream_cfg.is_async = true;
     
-    // Execute MSM with stream - use DeviceSlice for MSM
-    msm::msm(&coeffs_device.as_slice(), &bases_device.as_slice(), &stream_cfg, &mut result.as_mut_slice()).unwrap();
+    // Execute MSM with stream - DeviceVec derefs to DeviceSlice
+    msm::msm(&coeffs_device, &bases_device, &stream_cfg, &mut result).unwrap();
     
     // Copy result back with stream
     let mut host_result = vec![G1Projective::zero(); 1];
