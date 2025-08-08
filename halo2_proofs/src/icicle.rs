@@ -2,6 +2,7 @@ use group::ff::PrimeField;
 use icicle_bn254::curve::{CurveCfg, G1Projective, ScalarField};
 use halo2curves::bn256::Fr as Bn256Fr;
 use icicle_cuda_runtime::memory::{DeviceVec, HostSlice};
+use icicle_cuda_runtime::stream::IcicleStream;
 use crate::arithmetic::FftGroup;
 use std::any::{TypeId, Any};
 pub use halo2curves::CurveAffine;
@@ -29,7 +30,7 @@ use lazy_static::lazy_static;
 // CPU Staging Buffers for Data Conversion (Real Bottleneck #1)
 lazy_static! {
     static ref CPU_STAGING_BUFFERS: Mutex<HashMap<usize, Vec<u8>>> = Mutex::new(HashMap::new());
-    static ref GPU_STREAMS: Mutex<HashMap<u32, icicle_cuda_runtime::Stream>> = Mutex::new(HashMap::new());
+    static ref GPU_STREAMS: Mutex<HashMap<u32, icicle_cuda_runtime::stream::IcicleStream>> = Mutex::new(HashMap::new());
     static ref STREAM_COUNTER: AtomicUsize = AtomicUsize::new(0);
 }
 
@@ -59,7 +60,7 @@ fn return_cpu_staging_buffer(buffer: Vec<u8>) {
 }
 
 /// Get or create GPU stream for parallel operations
-fn get_gpu_stream() -> icicle_cuda_runtime::Stream {
+fn get_gpu_stream() -> icicle_cuda_runtime::stream::IcicleStream {
     let stream_id = STREAM_COUNTER.fetch_add(1, Ordering::Relaxed) as u32;
     let mut streams = GPU_STREAMS.lock().unwrap();
     
@@ -67,12 +68,12 @@ fn get_gpu_stream() -> icicle_cuda_runtime::Stream {
         stream
     } else {
         // Create new stream
-        icicle_cuda_runtime::Stream::new().unwrap()
+        icicle_cuda_runtime::stream::IcicleStream::create().unwrap()
     }
 }
 
 /// Return GPU stream to pool
-fn return_gpu_stream(stream: icicle_cuda_runtime::Stream) {
+fn return_gpu_stream(stream: icicle_cuda_runtime::stream::IcicleStream) {
     let mut streams = GPU_STREAMS.lock().unwrap();
     let stream_id = STREAM_COUNTER.fetch_sub(1, Ordering::Relaxed) as u32;
     
@@ -204,21 +205,26 @@ fn execute_gpu_msm_with_streams<C: CurveAffine>(
 ) -> G1Projective {
     let stream = get_gpu_stream();
     
-    // Create device vectors with stream
+    // Create device vectors
     let coeffs_device = DeviceVec::<ScalarField>::cuda_malloc(coeffs.len()).unwrap();
     let bases_device = DeviceVec::<Affine<CurveCfg>>::cuda_malloc(bases.len()).unwrap();
     let mut result = DeviceVec::<G1Projective>::cuda_malloc(1).unwrap();
     
     // Copy data to GPU with stream
-    coeffs_device.copy_from_host(coeffs, &stream).unwrap();
-    bases_device.copy_from_host(bases, &stream).unwrap();
+    coeffs_device.copy_from_host_async(&HostSlice::from_slice(coeffs), &stream).unwrap();
+    bases_device.copy_from_host_async(&HostSlice::from_slice(bases), &stream).unwrap();
+    
+    // Create MSM config with stream
+    let mut stream_cfg = cfg.clone();
+    stream_cfg.stream_handle = stream.handle;
+    stream_cfg.is_async = true;
     
     // Execute MSM with stream
-    msm::msm(&coeffs_device, &bases_device, cfg, &mut result[..]).unwrap();
+    msm::msm(&coeffs_device, &bases_device, &stream_cfg, &mut result[..]).unwrap();
     
     // Copy result back with stream
     let mut host_result = vec![G1Projective::zero(); 1];
-    result.copy_to_host(&mut host_result, &stream).unwrap();
+    result.copy_to_host_async(&mut HostSlice::from_mut_slice(&mut host_result), &stream).unwrap();
     
     // Synchronize stream
     stream.synchronize().unwrap();
