@@ -444,7 +444,6 @@ where
                 let advice_commitments = advice_commitments;
                 drop(advice_commitments_projective);
 
-                }
                 log::debug!("    Advice commitments: {:?}", commitment_start.elapsed());
 
                 let transcript_start = Instant::now();
