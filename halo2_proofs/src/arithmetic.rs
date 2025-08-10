@@ -627,11 +627,20 @@ pub fn batched_msm_operations<C: CurveAffine>(
     #[cfg(feature = "icicle_gpu")]
     {
         let enable_gpu = env::var("ENABLE_ICICLE_GPU").is_ok();
+        let enable_batching = env::var("HALO2_MSM_BATCHING")
+            .unwrap_or_else(|_| "1".to_string())
+            .parse::<bool>()
+            .unwrap_or(true);
         let gpu_supported = operations.iter().any(|(coeffs, _)| {
             coeffs.len() > 0 && icicle::is_gpu_supported_field(&coeffs[0])
         });
         
-        if enable_gpu && gpu_supported {
+        println!("🔍 [BATCHED_MSM] GPU dispatch decision:");
+        println!("   ⚙️  ENABLE_ICICLE_GPU: {}", enable_gpu);
+        println!("   ⚙️  HALO2_MSM_BATCHING: {}", enable_batching);
+        println!("   🔧 GPU supported field: {}", gpu_supported);
+        
+        if enable_gpu && enable_batching && gpu_supported {
             println!("   🚀 Using GPU batched MSM");
             let results = icicle::batched_multiexp_on_device::<C>(operations);
             
