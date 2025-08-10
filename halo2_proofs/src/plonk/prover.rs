@@ -34,7 +34,7 @@ use crate::{
     circuit::Value,
     plonk::Assigned,
     poly::{
-        commitment::{Blind, CommitmentScheme, Params, Prover},
+        commitment::{Blind, CommitmentScheme, Params, ParamsProver, Prover},
         Basis, Coeff, LagrangeCoeff, Polynomial, ProverQuery, EvaluationDomain,
     },
 };
@@ -352,7 +352,7 @@ pub fn create_proof<
 ) -> Result<(), Error>
 where
     Scheme::Scalar: WithSmallOrderMulGroup<3> + FromUniformBytes<64>,
-    Scheme::ParamsProver: Send + Sync,
+    Scheme::ParamsProver: Send + Sync + ParamsProver<'params, Scheme::Curve>,
 {
     println!("🎯 [PROOF_GENERATION] Starting proof generation with parallel witness processing optimizations");
     println!("   📊 Circuits: {}, Instances: {}", circuits.len(), instances.len());
@@ -746,18 +746,49 @@ where
                     }
                 }
                 
-                // Compute commitments in parallel batches
+                // Compute commitments using batched MSM when possible
                 let batch_size = get_witness_batch_size();
                 let mut advice_commitments_projective = Vec::with_capacity(advice_values.len());
                 
                 for (chunk_idx, chunk) in advice_values.chunks(batch_size).enumerate() {
                     let chunk_start = Instant::now();
                     let chunk_blinds = &blinds[..chunk.len()];
-                    let chunk_commitments: Vec<_> = chunk
-                        .iter()
-                        .zip(chunk_blinds.iter())
-                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                        .collect();
+                    
+                    // Check if we can use batched commitment for this chunk
+                    let use_batching = std::env::var("HALO2_MSM_BATCHING")
+                        .unwrap_or_else(|_| "1".to_string())
+                        .parse::<bool>()
+                        .unwrap_or(true);
+                    
+                    let chunk_commitments = if use_batching && chunk.len() > 1 {
+                        // Use batched commitment for multiple polynomials
+                        println!("   🚀 Using batched commitment for chunk {} with {} polynomials", chunk_idx, chunk.len());
+                        
+                        // Convert to coefficient form for batched commitment
+                        let chunk_coeffs: Vec<_> = chunk
+                            .iter()
+                            .map(|poly| domain.lagrange_to_coeff(poly.clone()))
+                            .collect();
+                        
+                        // Use batched commitment
+                        let batched_commitments = params.batched_commit(
+                            &chunk_coeffs.iter().collect::<Vec<_>>()
+                        );
+                        
+                        // Convert back to projective form
+                        batched_commitments
+                            .into_iter()
+                            .map(|commitment| commitment.to_projective())
+                            .collect::<Vec<_>>()
+                    } else {
+                        // Fallback to individual commitments
+                        chunk
+                            .iter()
+                            .zip(chunk_blinds.iter())
+                            .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                            .collect()
+                    };
+                    
                     advice_commitments_projective.extend(chunk_commitments);
                     let chunk_elapsed = chunk_start.elapsed();
                     println!("   📦 Commitment chunk {}: {} elements in {:.2?}", chunk_idx, chunk.len(), chunk_elapsed);
