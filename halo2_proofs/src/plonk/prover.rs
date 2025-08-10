@@ -78,6 +78,12 @@ where
         *FFT_COUNTER.lock().unwrap() = BTreeMap::new();
     }
 
+    // Reset MSM statistics at the beginning of proof generation
+    crate::arithmetic::reset_msm_stats();
+    
+    // Reset FFT statistics at the beginning of proof generation
+    crate::arithmetic::reset_fft_stats();
+
     if circuits.len() != instances.len() {
         return Err(Error::InvalidInstances);
     }
@@ -88,10 +94,13 @@ where
         }
     }
 
-    let start = Instant::now();
+    // Phase 1: Initialization and Validation
+    let phase1_start = Instant::now();
+    
     // Hash verification key into transcript
     pk.vk.hash_into(transcript)?;
-    log::trace!("Hashing verification key: {:?}", start.elapsed());
+    
+    log::info!("🔄 [PHASE 1] Initialization and Validation: {:?}", phase1_start.elapsed());
 
     let domain = &pk.vk.domain;
     let mut meta = ConstraintSystem::default();
@@ -109,7 +118,8 @@ where
         pub instance_polys: Vec<Polynomial<C::Scalar, Coeff>>,
     }
 
-    let start = Instant::now();
+    // Phase 2: Instance Preparation
+    let phase2_start = Instant::now();
     let instance: Vec<InstanceSingle<Scheme::Curve>> = instances
         .iter()
         .map(|instance| -> Result<InstanceSingle<Scheme::Curve>, Error> {
@@ -164,7 +174,7 @@ where
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    log::trace!("Instance preparation: {:?}", start.elapsed());
+    log::info!("🔄 [PHASE 2] Instance Preparation: {:?}", phase2_start.elapsed());
 
     #[derive(Clone)]
     struct AdviceSingle<C: CurveAffine, B: Basis> {
@@ -317,7 +327,8 @@ where
         }
     }
 
-    let start = Instant::now();
+    // Phase 3: Witness Collection and Advice Preparation
+    let phase3_start = Instant::now();
     let (advice, challenges) = {
         let mut advice = vec![
             AdviceSingle::<Scheme::Curve, LagrangeCoeff> {
@@ -332,7 +343,7 @@ where
 
         let unusable_rows_start = params.n() as usize - (meta.blinding_factors() + 1);
         for current_phase in pk.vk.cs.phases() {
-            let _start = Instant::now();
+            let phase_sub_start = Instant::now();
             let column_indices = meta
                 .advice_column_phase
                 .iter()
@@ -349,7 +360,7 @@ where
             for ((circuit, advice), instances) in
                 circuits.iter().zip(advice.iter_mut()).zip(instances)
             {
-                let _start = Instant::now();
+                let circuit_start = Instant::now();
                 let mut witness = WitnessCollection {
                     k: params.k(),
                     current_phase,
@@ -365,7 +376,7 @@ where
                     _marker: std::marker::PhantomData,
                 };
 
-                let _start = Instant::now();
+                let synthesis_start = Instant::now();
                 // Synthesize the circuit to obtain the witness and other information.
                 ConcreteCircuit::FloorPlanner::synthesize(
                     &mut witness,
@@ -373,8 +384,9 @@ where
                     config.clone(),
                     meta.constants.clone(),
                 )?;
+                log::debug!("    Circuit synthesis: {:?}", synthesis_start.elapsed());
 
-                let _start = Instant::now();
+                let batch_invert_start = Instant::now();
                 let mut advice_values = batch_invert_assigned::<Scheme::Scalar>(
                     witness
                         .advice
@@ -389,8 +401,9 @@ where
                         })
                         .collect(),
                 );
+                log::debug!("    Batch invert: {:?}", batch_invert_start.elapsed());
 
-                let _start = Instant::now();
+                let blinding_start = Instant::now();
                 // Add blinding factors to advice columns
                 for (column_index, advice_values) in column_indices.iter().zip(&mut advice_values) {
                     if !witness.unblinded_advice.contains(column_index) {
@@ -403,8 +416,9 @@ where
                         }
                     }
                 }
+                log::debug!("    Blinding factors: {:?}", blinding_start.elapsed());
 
-                let _start = Instant::now();
+                let commitment_start = Instant::now();
                 // Compute commitments to advice column polynomials
                 let blinds: Vec<_> = column_indices
                     .iter()
@@ -430,7 +444,10 @@ where
                 let advice_commitments = advice_commitments;
                 drop(advice_commitments_projective);
 
-                let _start = Instant::now();
+                }
+                log::debug!("    Advice commitments: {:?}", commitment_start.elapsed());
+
+                let transcript_start = Instant::now();
                 for commitment in &advice_commitments {
                     transcript.write_point(*commitment)?;
                 }
@@ -440,6 +457,8 @@ where
                     advice.advice_polys[*column_index] = advice_values;
                     advice.advice_blinds[*column_index] = blind;
                 }
+                log::debug!("    Transcript updates: {:?}", transcript_start.elapsed());
+                log::debug!("    Total circuit processing: {:?}", circuit_start.elapsed());
             }
 
             for (index, phase) in meta.challenge_phase.iter().enumerate() {
@@ -449,6 +468,7 @@ where
                     assert!(existing.is_none());
                 }
             }
+            log::debug!("  Phase {} completed: {:?}", current_phase, phase_sub_start.elapsed());
         }
 
         assert_eq!(challenges.len(), meta.num_challenges);
@@ -458,12 +478,13 @@ where
 
         (advice, challenges)
     };
-    log::trace!("Advice preparation: {:?}", start.elapsed());
+    log::info!("🔄 [PHASE 3] Witness Collection and Advice Preparation: {:?}", phase3_start.elapsed());
 
+    // Phase 4: Lookup Preparation
+    let phase4_start = Instant::now();
+    
     // Sample theta challenge for keeping lookup columns linearly independent
-    let start = Instant::now();
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
-    log::trace!("Theta challenge: {:?}", start.elapsed());
 
     let start = Instant::now();
 
@@ -529,20 +550,18 @@ where
                 .collect()
         })
         .collect::<Result<Vec<_>, _>>()?;
-    log::trace!("Lookup preparation: {:?}", start.elapsed());
+    log::info!("🔄 [PHASE 4] Lookup Preparation: {:?}", phase4_start.elapsed());
 
+    // Phase 5: Permutation Commitment
+    let phase5_start = Instant::now();
+    
     // Sample beta challenge
-    let start = Instant::now();
     let beta: ChallengeBeta<_> = transcript.squeeze_challenge_scalar();
-    log::trace!("Beta challenge: {:?}", start.elapsed());
-
+    
     // Sample gamma challenge
-    let start = Instant::now();
     let gamma: ChallengeGamma<_> = transcript.squeeze_challenge_scalar();
-    log::trace!("Gamma challenge: {:?}", start.elapsed());
-
+    
     // Commit to permutations.
-    let start = Instant::now();
     let permutations: Vec<permutation::prover::Committed<Scheme::Curve>> = instance
         .iter()
         .zip(advice.iter())
@@ -561,7 +580,7 @@ where
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    log::trace!("Permutation commitment: {:?}", start.elapsed());
+    log::info!("🔄 [PHASE 5] Permutation Commitment: {:?}", phase5_start.elapsed());
 
     // preallocate the lookups
 
@@ -609,7 +628,8 @@ where
             .collect::<Result<Vec<_>, _>>()
     };
 
-    let start = Instant::now();
+    // Phase 6: Lookup Product Commitments
+    let phase6_start = Instant::now();
     let lookups = commit_lookups()?;
 
     #[cfg(feature = "mv-lookup")]
@@ -621,9 +641,10 @@ where
         }
     }
 
-    log::trace!("Lookup commitment: {:?}", start.elapsed());
+    log::info!("🔄 [PHASE 6] Lookup Product Commitments: {:?}", phase6_start.elapsed());
 
-    let start = Instant::now();
+    // Phase 7: Shuffle Commitments
+    let phase7_start = Instant::now();
     let shuffles: Vec<Vec<shuffle::prover::Committed<Scheme::Curve>>> = instance
         .iter()
         .zip(advice.iter())
@@ -651,20 +672,18 @@ where
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
-    log::trace!("Shuffle commitment: {:?}", start.elapsed());
+    log::info!("🔄 [PHASE 7] Shuffle Commitments: {:?}", phase7_start.elapsed());
 
-    let start = Instant::now();
+    // Phase 8: Vanishing Argument
+    let phase8_start = Instant::now();
+    
     // Commit to the vanishing argument's random polynomial for blinding h(x_3)
     let vanishing = vanishing::Argument::commit(params, domain, &mut rng, transcript)?;
-    log::trace!("Vanishing commitment: {:?}", start.elapsed());
 
     // Obtain challenge for keeping all separate gates linearly independent
-    let start = Instant::now();
     let y: ChallengeY<_> = transcript.squeeze_challenge_scalar();
-    log::trace!("Y challenge: {:?}", start.elapsed());
 
     // Calculate the advice polys
-    let start = Instant::now();
     let advice: Vec<AdviceSingle<Scheme::Curve, Coeff>> = advice
         .into_iter()
         .map(
@@ -682,10 +701,8 @@ where
             },
         )
         .collect();
-    log::trace!("Advice calculation: {:?}", start.elapsed());
 
     // Evaluate the h(X) polynomial
-    let start = Instant::now();
     let h_poly = pk.ev.evaluate_h(
         pk,
         &advice
@@ -705,17 +722,17 @@ where
         &shuffles,
         &permutations,
     );
-    log::trace!("H(X) evaluation: {:?}", start.elapsed());
 
     // Construct the vanishing argument's h(X) commitments
-    let start = Instant::now();
     let vanishing = vanishing.construct(params, domain, h_poly, &mut rng, transcript)?;
-    log::trace!("Vanishing construction: {:?}", start.elapsed());
+    
+    log::info!("🔄 [PHASE 8] Vanishing Argument: {:?}", phase8_start.elapsed());
 
-    let start = Instant::now();
+    // Phase 9: Challenge Generation and Evaluation
+    let phase9_start = Instant::now();
+    
     let x: ChallengeX<_> = transcript.squeeze_challenge_scalar();
     let xn = x.pow([params.n()]);
-    log::trace!("X challenge: {:?}", start.elapsed());
 
     let start = Instant::now();
     if P::QUERY_INSTANCE {
@@ -739,7 +756,6 @@ where
             }
         }
     }
-    log::trace!("Instance evaluation: {:?}", start.elapsed());
 
     let start = Instant::now();
     // Compute and hash advice evals for each circuit instance
@@ -761,7 +777,6 @@ where
             transcript.write_scalar(*eval)?;
         }
     }
-    log::trace!("Advice evaluation: {:?}", start.elapsed());
 
     let start = Instant::now();
     // Compute and hash fixed evals (shared across all circuit instances)
@@ -772,35 +787,24 @@ where
             eval_polynomial(&pk.fixed_polys[column.index()], domain.rotate_omega(*x, at))
         })
         .collect();
-    log::trace!("Fixed evaluation: {:?}", start.elapsed());
 
     // Hash each fixed column evaluation
-    let start = Instant::now();
     for eval in fixed_evals.iter() {
         transcript.write_scalar(*eval)?;
     }
-    log::trace!("Fixed evaluation hashing: {:?}", start.elapsed());
 
-    let start = Instant::now();
     let vanishing = vanishing.evaluate(x, xn, domain, transcript)?;
-    log::trace!("Vanishing evaluation: {:?}", start.elapsed());
 
     // Evaluate common permutation data
-    let start = Instant::now();
     pk.permutation.evaluate(x, transcript)?;
-    log::trace!("Permutation evaluation: {:?}", start.elapsed());
 
     // Evaluate the permutations, if any, at omega^i x.
-    let start = Instant::now();
     let permutations: Vec<permutation::prover::Evaluated<Scheme::Curve>> = permutations
         .into_iter()
         .map(|permutation| -> Result<_, _> { permutation.construct().evaluate(pk, x, transcript) })
         .collect::<Result<Vec<_>, _>>()?;
-    log::trace!("Permutation evaluation: {:?}", start.elapsed());
 
     // Evaluate the lookups, if any, at omega^i x.
-
-    let start = Instant::now();
 
     let lookups: Vec<Vec<lookup::prover::Evaluated<Scheme::Curve>>> = lookups
         .into_iter()
@@ -817,10 +821,8 @@ where
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
-    log::trace!("Lookup evaluation: {:?}", start.elapsed());
 
     // Evaluate the shuffles, if any, at omega^i x.
-    let start = Instant::now();
     let shuffles: Vec<Vec<shuffle::prover::Evaluated<Scheme::Curve>>> = shuffles
         .into_iter()
         .map(|shuffles| -> Result<Vec<_>, _> {
@@ -830,7 +832,6 @@ where
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
-    log::trace!("Shuffle evaluation: {:?}", start.elapsed());
 
     let start = Instant::now();
     let instances = instance
@@ -882,7 +883,8 @@ where
         .chain(pk.permutation.open(x))
         // We query the h(X) polynomial at x
         .chain(vanishing.open(x));
-    log::trace!("Open queries: {:?}", start.elapsed());
+    
+    log::info!("🔄 [PHASE 9] Challenge Generation and Evaluation: {:?}", phase9_start.elapsed());
 
     #[cfg(feature = "counter")]
     {
@@ -896,10 +898,41 @@ where
         *FFT_COUNTER.lock().unwrap() = BTreeMap::new();
     }
 
+    // Phase 10: Final Multi-Open Proof
+    let phase10_start = Instant::now();
+    
     let prover = P::new(params);
-    prover
+    let result = prover
         .create_proof(rng, transcript, instances)
-        .map_err(|_| Error::ConstraintSystemFailure)
+        .map_err(|_| Error::ConstraintSystemFailure);
+    
+    log::info!("🔄 [PHASE 10] Final Multi-Open Proof: {:?}", phase10_start.elapsed());
+    
+    // Total proof generation time
+    let total_start = phase1_start;
+    log::info!("🚀 [TOTAL] Complete Proof Generation: {:?}", total_start.elapsed());
+    
+    // Print MSM statistics
+    let (total_msm_count, total_msm_time, gpu_count, cpu_count, metal_count) = crate::arithmetic::get_msm_stats();
+    log::info!("📊 [MSM_STATS] Total MSM operations: {} (GPU: {}, CPU: {}, Metal: {})", 
+               total_msm_count, gpu_count, cpu_count, metal_count);
+    log::info!("📊 [MSM_STATS] Total MSM time: {:?} ({:.2}% of total)", 
+               total_msm_time, (total_msm_time.as_millis() as f64 / total_start.elapsed().as_millis() as f64) * 100.0);
+    if total_msm_count > 0 {
+        log::info!("📊 [MSM_STATS] Average MSM time: {:?}", total_msm_time / total_msm_count as u32);
+    }
+    
+    // Print FFT statistics
+    let (total_fft_count, total_fft_time, fft_gpu_count, fft_cpu_count) = crate::arithmetic::get_fft_stats();
+    log::info!("📊 [FFT_STATS] Total FFT operations: {} (GPU: {}, CPU: {})", 
+               total_fft_count, fft_gpu_count, fft_cpu_count);
+    log::info!("📊 [FFT_STATS] Total FFT time: {:?} ({:.2}% of total)", 
+               total_fft_time, (total_fft_time.as_millis() as f64 / total_start.elapsed().as_millis() as f64) * 100.0);
+    if total_fft_count > 0 {
+        log::info!("📊 [FFT_STATS] Average FFT time: {:?}", total_fft_time / total_fft_count as u32);
+    }
+    
+    result
 }
 
 #[test]

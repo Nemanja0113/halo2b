@@ -33,11 +33,15 @@ where
 
 /// Best MSM
 pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
+    let data_size = coeffs.len();
+    let log_size = data_size.ilog2();
+    
     #[cfg(feature = "icicle_gpu")]
     if env::var("ENABLE_ICICLE_GPU").is_ok()
         && !icicle::should_use_cpu_msm(coeffs.len())
         && icicle::is_gpu_supported_field(&coeffs[0])
     {
+        log::debug!("🔄 [MSM_DISPATCH] Using GPU path: {} elements (log2: {})", data_size, log_size);
         return best_multiexp_gpu(coeffs, bases);
     }
 
@@ -55,14 +59,30 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
                 "WARNING: Using Experimental Metal Acceleration for MSM. \
                  Best performance improvements are observed with log row size >= 20. \
                  Current log size: {}",
-                coeffs.len().ilog2()
+                log_size
             );
         });
 
-        // Perform MSM using Metal acceleration
-        return mopro_msm::metal::msm_best::<C, H2GAffine, H2G, H2Fr>(coeffs, bases);
+        log::debug!("🔄 [MSM_DISPATCH] Using Metal path: {} elements (log2: {})", data_size, log_size);
+        
+        // Perform MSM using Metal acceleration with timing
+        use instant::Instant;
+        let msm_start = Instant::now();
+        let result = mopro_msm::metal::msm_best::<C, H2GAffine, H2G, H2Fr>(coeffs, bases);
+        let elapsed = msm_start.elapsed();
+        
+        log::info!("⚡ [MSM_METAL] Metal MSM completed: {} elements in {:?} ({:.2} elements/ms)", 
+                   data_size, elapsed, data_size as f64 / elapsed.as_millis() as f64);
+        
+        // Update global counters
+        MSM_COUNTER.fetch_add(1, Ordering::Relaxed);
+        MSM_METAL_COUNTER.fetch_add(1, Ordering::Relaxed);
+        *MSM_TOTAL_TIME.lock().unwrap() += elapsed;
+        
+        return result;
     }
 
+    log::debug!("🔄 [MSM_DISPATCH] Using CPU path: {} elements (log2: {})", data_size, log_size);
     #[allow(unreachable_code)]
     best_multiexp_cpu(coeffs, bases)
 }
@@ -74,13 +94,49 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
 ///
 /// This will use multithreading if beneficial.
 pub fn best_multiexp_cpu<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
-    msm_best(coeffs, bases)
+    use instant::Instant;
+    
+    let msm_start = Instant::now();
+    let data_size = coeffs.len();
+    
+    log::debug!("🚀 [MSM_CPU] Starting CPU MSM: {} elements", data_size);
+    
+    let result = msm_best(coeffs, bases);
+    
+    let elapsed = msm_start.elapsed();
+    log::info!("⚡ [MSM_CPU] CPU MSM completed: {} elements in {:?} ({:.2} elements/ms)", 
+               data_size, elapsed, data_size as f64 / elapsed.as_millis() as f64);
+    
+    // Update global counters
+    MSM_COUNTER.fetch_add(1, Ordering::Relaxed);
+    MSM_CPU_COUNTER.fetch_add(1, Ordering::Relaxed);
+    *MSM_TOTAL_TIME.lock().unwrap() += elapsed;
+    
+    result
 }
 
 #[cfg(feature = "icicle_gpu")]
 /// Performs a multi-exponentiation operation on GPU using Icicle library
 pub fn best_multiexp_gpu<C: CurveAffine>(coeffs: &[C::Scalar], g: &[C]) -> C::Curve {
-    icicle::multiexp_on_device::<C>(coeffs, g)
+    use instant::Instant;
+    
+    let msm_start = Instant::now();
+    let data_size = coeffs.len();
+    
+    log::debug!("🚀 [MSM_GPU] Starting GPU MSM: {} elements", data_size);
+    
+    let result = icicle::multiexp_on_device::<C>(coeffs, g);
+    
+    let elapsed = msm_start.elapsed();
+    log::info!("⚡ [MSM_GPU] GPU MSM completed: {} elements in {:?} ({:.2} elements/ms)", 
+               data_size, elapsed, data_size as f64 / elapsed.as_millis() as f64);
+    
+    // Update global counters
+    MSM_COUNTER.fetch_add(1, Ordering::Relaxed);
+    MSM_GPU_COUNTER.fetch_add(1, Ordering::Relaxed);
+    *MSM_TOTAL_TIME.lock().unwrap() += elapsed;
+    
+    result
 }
 
 /// Dispatcher
@@ -91,7 +147,21 @@ pub fn best_fft_cpu<Scalar: Field, G: FftGroup<Scalar>>(
     data: &FFTData<Scalar>,
     inverse: bool,
 ) {
+    use instant::Instant;
+    let fft_start = Instant::now();
+    let data_size = a.len();
+    log::debug!("🚀 [FFT_CPU] Starting CPU FFT: {} elements (log2: {})", data_size, log_n);
+    
     fft::fft(a, omega, log_n, data, inverse);
+    
+    let elapsed = fft_start.elapsed();
+    log::info!("⚡ [FFT_CPU] CPU FFT completed: {} elements in {:?} ({:.2} elements/ms)",
+               data_size, elapsed, data_size as f64 / elapsed.as_millis() as f64);
+    
+    // Update global counters
+    FFT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    FFT_CPU_COUNTER.fetch_add(1, Ordering::Relaxed);
+    *FFT_TOTAL_TIME.lock().unwrap() += elapsed;
 }
 
 /// Best FFT
@@ -102,18 +172,25 @@ pub fn best_fft<Scalar: Field + ff::PrimeField, G: FftGroup<Scalar> + ff::PrimeF
     data: &FFTData<Scalar>,
     inverse: bool,
 ) {
+    let data_size = scalars.len();
+    
     #[cfg(feature = "icicle_gpu")]
     if env::var("ENABLE_ICICLE_GPU").is_ok()
         && !icicle::should_use_cpu_fft(scalars.len())
         && icicle::is_gpu_supported_field(&omega)
     {
+        log::debug!("🔄 [FFT_DISPATCH] Using GPU path: {} elements (log2: {})", data_size, log_n);
         best_fft_gpu(scalars, omega, log_n, inverse);
     } else {
+        log::debug!("🔄 [FFT_DISPATCH] Using CPU path: {} elements (log2: {})", data_size, log_n);
         best_fft_cpu(scalars, omega, log_n, data, inverse);
     }
 
     #[cfg(not(feature = "icicle_gpu"))]
-    best_fft_cpu(scalars, omega, log_n, data, inverse);
+    {
+        log::debug!("🔄 [FFT_DISPATCH] Using CPU path: {} elements (log2: {})", data_size, log_n);
+        best_fft_cpu(scalars, omega, log_n, data, inverse);
+    }
 }
 
 /// Performs a NTT operation on GPU using Icicle library
@@ -124,8 +201,21 @@ pub fn best_fft_gpu<Scalar: Field + ff::PrimeField, G: FftGroup<Scalar> + ff::Pr
     log_n: u32,
     inverse: bool,
 ) {
-    println!("icicle_fft");
+    use instant::Instant;
+    let fft_start = Instant::now();
+    let data_size = a.len();
+    log::debug!("🚀 [FFT_GPU] Starting GPU FFT: {} elements (log2: {})", data_size, log_n);
+    
     icicle::fft_on_device::<Scalar, G>(a, omega, log_n, inverse);
+    
+    let elapsed = fft_start.elapsed();
+    log::info!("⚡ [FFT_GPU] GPU FFT completed: {} elements in {:?} ({:.2} elements/ms)",
+               data_size, elapsed, data_size as f64 / elapsed.as_millis() as f64);
+    
+    // Update global counters
+    FFT_COUNTER.fetch_add(1, Ordering::Relaxed);
+    FFT_GPU_COUNTER.fetch_add(1, Ordering::Relaxed);
+    *FFT_TOTAL_TIME.lock().unwrap() += elapsed;
 }
 
 /// Convert coefficient bases group elements to lagrange basis by inverse FFT.
@@ -388,6 +478,57 @@ use crate::fft::{self, recursive::FFTData};
 #[cfg(test)]
 use crate::halo2curves::pasta::Fp;
 // use crate::plonk::{get_duration, get_time, start_measure, stop_measure};
+
+// Global MSM tracking
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::time::Duration;
+
+lazy_static::lazy_static! {
+    static ref MSM_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static ref MSM_TOTAL_TIME: Mutex<Duration> = Mutex::new(Duration::ZERO);
+    static ref MSM_GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static ref MSM_CPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static ref MSM_METAL_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    
+    // FFT statistics tracking
+    static ref FFT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static ref FFT_TOTAL_TIME: Mutex<Duration> = Mutex::new(Duration::ZERO);
+    static ref FFT_GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static ref FFT_CPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
+}
+
+pub fn get_msm_stats() -> (usize, Duration, usize, usize, usize) {
+    let total_count = MSM_COUNTER.load(Ordering::Relaxed);
+    let total_time = *MSM_TOTAL_TIME.lock().unwrap();
+    let gpu_count = MSM_GPU_COUNTER.load(Ordering::Relaxed);
+    let cpu_count = MSM_CPU_COUNTER.load(Ordering::Relaxed);
+    let metal_count = MSM_METAL_COUNTER.load(Ordering::Relaxed);
+    (total_count, total_time, gpu_count, cpu_count, metal_count)
+}
+
+pub fn reset_msm_stats() {
+    MSM_COUNTER.store(0, Ordering::Relaxed);
+    *MSM_TOTAL_TIME.lock().unwrap() = Duration::ZERO;
+    MSM_GPU_COUNTER.store(0, Ordering::Relaxed);
+    MSM_CPU_COUNTER.store(0, Ordering::Relaxed);
+    MSM_METAL_COUNTER.store(0, Ordering::Relaxed);
+}
+
+pub fn get_fft_stats() -> (usize, Duration, usize, usize) {
+    let total_count = FFT_COUNTER.load(Ordering::Relaxed);
+    let total_time = *FFT_TOTAL_TIME.lock().unwrap();
+    let gpu_count = FFT_GPU_COUNTER.load(Ordering::Relaxed);
+    let cpu_count = FFT_CPU_COUNTER.load(Ordering::Relaxed);
+    (total_count, total_time, gpu_count, cpu_count)
+}
+
+pub fn reset_fft_stats() {
+    FFT_COUNTER.store(0, Ordering::Relaxed);
+    *FFT_TOTAL_TIME.lock().unwrap() = Duration::ZERO;
+    FFT_GPU_COUNTER.store(0, Ordering::Relaxed);
+    FFT_CPU_COUNTER.store(0, Ordering::Relaxed);
+}
 
 #[test]
 fn test_lagrange_interpolate() {
