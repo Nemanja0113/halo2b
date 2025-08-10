@@ -387,13 +387,20 @@ where
         }
 
         // Prepare batched operations
+        let mut scalars_vecs = Vec::new();
         let mut operations = Vec::new();
+        
         for poly in polynomials {
             let scalars: Vec<_> = poly.iter().cloned().collect();
             let size = scalars.len();
             assert!(self.g.len() >= size);
+            scalars_vecs.push(scalars);
+        }
+        
+        for (i, poly) in polynomials.iter().enumerate() {
+            let size = poly.len();
             operations.push((
-                scalars.as_slice(),
+                scalars_vecs[i].as_slice(),
                 &self.g[0..size],
             ));
         }
