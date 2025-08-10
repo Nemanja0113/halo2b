@@ -1,7 +1,7 @@
 use group::ff::PrimeField;
 use icicle_bn254::curve::{CurveCfg, G1Projective, ScalarField};
 use halo2curves::bn256::Fr as Bn256Fr;
-use icicle_cuda_runtime::memory::{DeviceVec, HostSlice};
+use icicle_cuda_runtime::memory::{DeviceVec, HostSlice, HostOrDeviceSlice};
 use crate::arithmetic::FftGroup;
 use std::any::{TypeId, Any};
 pub use halo2curves::CurveAffine;
@@ -12,6 +12,7 @@ use icicle_core::{
 };
 use maybe_rayon::iter::IntoParallelRefIterator;
 use maybe_rayon::iter::ParallelIterator;
+use maybe_rayon::iter::IndexedParallelIterator;
 use maybe_rayon::prelude::ParallelSlice;
 use std::{env, mem};
 
@@ -37,10 +38,10 @@ fn repr_from_u32<C: CurveAffine>(u32_arr: &[u32; 8]) -> <C as CurveAffine>::Base
     
     let t: &[<<C as CurveAffine>::Base as PrimeField>::Repr] =
         unsafe { mem::transmute(&u32_arr[..]) };
-    println!("      🔍 [REPR_CONVERSION] Transmuted to repr: {:?}", t);
+    println!("      🔍 [REPR_CONVERSION] Transmuted to repr (length: {})", t.len());
     
     let result = PrimeField::from_repr(t[0]).unwrap();
-    println!("      🔍 [REPR_CONVERSION] Converted to field: {:?}", result);
+    println!("      🔍 [REPR_CONVERSION] Converted to field successfully");
     
     return result;
 }
@@ -79,26 +80,29 @@ fn icicle_scalars_from_c_scalars<G: PrimeField>(coeffs: &[G]) -> Vec<ScalarField
     
     // Optimization 3: Use rayon's par_chunks for better parallelization
     let chunks: Vec<_> = coeffs.par_chunks(chunk_size)
+        .collect::<Vec<_>>()
+        .into_iter()
         .enumerate()
         .map(|(chunk_idx, chunk)| {
             println!("      🔍 [SCALAR_CONVERSION] Processing chunk {} with {} elements", chunk_idx, chunk.len());
             
             let chunk_result: Vec<_> = chunk.iter().enumerate().map(|(elem_idx, coef)| {
                 // Add detailed debugging for the problematic conversion
-                if elem_idx < 3 || elem_idx == chunk.len() - 1 {
+                let chunk_len = chunk.len();
+                if elem_idx < 3 || elem_idx == chunk_len - 1 {
                     println!("      🔍 [SCALAR_CONVERSION] Converting element {} in chunk {}: {:?}", 
                              elem_idx, chunk_idx, coef);
                 }
                 
                 let repr: [u32; 8] = unsafe { mem::transmute_copy(&coef.to_repr()) };
                 
-                if elem_idx < 3 || elem_idx == chunk.len() - 1 {
+                if elem_idx < 3 || elem_idx == chunk_len - 1 {
                     println!("      🔍 [SCALAR_CONVERSION] Repr for element {}: {:?}", elem_idx, repr);
                 }
                 
                 let scalar = ScalarField::from(repr);
                 
-                if elem_idx < 3 || elem_idx == chunk.len() - 1 {
+                if elem_idx < 3 || elem_idx == chunk_len - 1 {
                     println!("      🔍 [SCALAR_CONVERSION] Converted scalar for element {}: {:?}", elem_idx, scalar);
                 }
                 
@@ -212,19 +216,22 @@ fn icicle_points_from_c<C: CurveAffine>(bases: &[C]) -> Vec<Affine<CurveCfg>> {
     
     // Optimization 3: Use rayon's par_chunks for better parallelization
     let chunks: Vec<_> = bases.par_chunks(chunk_size)
+        .collect::<Vec<_>>()
+        .into_iter()
         .enumerate()
         .map(|(chunk_idx, chunk)| {
             println!("      🔍 [POINT_CONVERSION] Processing chunk {} with {} elements", chunk_idx, chunk.len());
             
             let chunk_result: Vec<_> = chunk.iter().enumerate().map(|(elem_idx, p)| {
                 // Add detailed debugging for the problematic conversion
-                if elem_idx < 3 || elem_idx == chunk.len() - 1 {
+                let chunk_len = chunk.len();
+                if elem_idx < 3 || elem_idx == chunk_len - 1 {
                     println!("      🔍 [POINT_CONVERSION] Converting point {} in chunk {}", elem_idx, chunk_idx);
                 }
                 
                 let coordinates = p.coordinates().unwrap();
                 
-                if elem_idx < 3 || elem_idx == chunk.len() - 1 {
+                if elem_idx < 3 || elem_idx == chunk_len - 1 {
                     println!("      🔍 [POINT_CONVERSION] Coordinates for point {}: x={:?}, y={:?}", 
                              elem_idx, coordinates.x(), coordinates.y());
                 }
@@ -232,13 +239,13 @@ fn icicle_points_from_c<C: CurveAffine>(bases: &[C]) -> Vec<Affine<CurveCfg>> {
                 let x_repr: [u32; 8] = unsafe { mem::transmute_copy(&coordinates.x().to_repr()) };
                 let y_repr: [u32; 8] = unsafe { mem::transmute_copy(&coordinates.y().to_repr()) };
 
-                if elem_idx < 3 || elem_idx == chunk.len() - 1 {
+                if elem_idx < 3 || elem_idx == chunk_len - 1 {
                     println!("      🔍 [POINT_CONVERSION] Repr for point {}: x={:?}, y={:?}", elem_idx, x_repr, y_repr);
                 }
 
                 let affine = Affine::<CurveCfg>::from_limbs(x_repr, y_repr);
                 
-                if elem_idx < 3 || elem_idx == chunk.len() - 1 {
+                if elem_idx < 3 || elem_idx == chunk_len - 1 {
                     println!("      🔍 [POINT_CONVERSION] Converted affine for point {}: {:?}", elem_idx, affine);
                 }
                 
@@ -432,7 +439,7 @@ pub fn batched_multiexp_on_device<C: CurveAffine>(
         let bases_slice = HostSlice::from_slice(&bases.as_slice()[offset_bases..offset_bases + size]);
         
         println!("   🔍 [GPU_BATCHED_MSM] Created slices for operation {}: coeffs={}, bases={}", 
-                 i, coeffs_slice.len(), bases_slice.len());
+                 i, HostOrDeviceSlice::len(&coeffs_slice), HostOrDeviceSlice::len(&bases_slice));
         
         // For single result, we need to create a new DeviceVec for each operation
         let mut single_result = DeviceVec::<G1Projective>::cuda_malloc(1).unwrap();
