@@ -366,6 +366,39 @@ where
         best_multiexp(&scalars, &bases[0..size])
     }
 
+    /// Batched commitment for multiple polynomials
+    fn batched_commit(&self, polynomials: &[&Polynomial<E::Fr, Coeff>]) -> Vec<E::G1> {
+        if polynomials.is_empty() {
+            return Vec::new();
+        }
+
+        // Check if batching is enabled via environment variable
+        let use_batching = std::env::var("HALO2_MSM_BATCHING")
+            .unwrap_or_else(|_| "1".to_string())
+            .parse::<bool>()
+            .unwrap_or(true);
+
+        if !use_batching {
+            // Fallback to individual commitments
+            return polynomials
+                .iter()
+                .map(|poly| self.commit(poly, Blind::default()))
+                .collect();
+        }
+
+        // Prepare batched operations
+        let mut operations = Vec::new();
+        for poly in polynomials {
+            let scalars: Vec<_> = poly.iter().collect();
+            let size = scalars.len();
+            assert!(self.g.len() >= size);
+            operations.push((scalars.as_slice(), &self.g[0..size]));
+        }
+
+        // Use batched MSM
+        crate::arithmetic::batched_msm_operations(&operations)
+    }
+
     fn get_g(&self) -> &[E::G1Affine] {
         &self.g
     }
