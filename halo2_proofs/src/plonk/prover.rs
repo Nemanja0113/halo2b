@@ -478,7 +478,6 @@ where
                         .collect()
                 };
                 let advice_commitments = advice_commitments_projective;
-                drop(advice_commitments_projective);
 
                 log::debug!("    Advice commitments: {:?}", commitment_start.elapsed());
 

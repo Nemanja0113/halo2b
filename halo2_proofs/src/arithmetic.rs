@@ -140,8 +140,8 @@ impl GlobalMSMBatcher {
                     let coeffs = op.coeffs.clone();
                     let bases = op.bases.clone();
                     let id = op.id;
-                    coeffs_batches.push(coeffs.as_slice());
-                    bases_batches.push(bases.as_slice());
+                    coeffs_batches.push(coeffs);
+                    bases_batches.push(bases);
                     operation_ids.push(id);
                     operations_with_results.push(op);
                 }
@@ -151,7 +151,9 @@ impl GlobalMSMBatcher {
                 // Use batched MSM if GPU is available
                 #[cfg(feature = "icicle_gpu")]
                 let batched_results = if env::var("ENABLE_ICICLE_GPU").is_ok() {
-                    icicle::batched_multiexp_on_device(&coeffs_batches, &bases_batches)
+                    let coeffs_slices: Vec<&[C::Scalar]> = coeffs_batches.iter().map(|c| c.as_slice()).collect();
+                    let bases_slices: Vec<&[C]> = bases_batches.iter().map(|b| b.as_slice()).collect();
+                    icicle::batched_multiexp_on_device(&coeffs_slices, &bases_slices)
                 } else {
                     // Fallback to individual CPU MSM
                     coeffs_batches
