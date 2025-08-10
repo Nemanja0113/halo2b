@@ -281,10 +281,36 @@ where
         .permutation
         .build_vk(params, &domain, &cs.permutation);
 
-    let fixed_commitments = fixed
-        .iter()
-        .map(|poly| params.commit_lagrange(poly, Blind::default()).to_affine())
-        .collect();
+    // Use batched commitment for fixed polynomials if enabled
+    let use_batching = std::env::var("HALO2_MSM_BATCHING")
+        .unwrap_or_else(|_| "1".to_string())
+        .parse::<bool>()
+        .unwrap_or(true);
+
+    let fixed_commitments = if use_batching {
+        // Convert to coefficient form for batched commitment
+        let fixed_coeffs: Vec<_> = fixed
+            .iter()
+            .map(|poly| vk.domain.lagrange_to_coeff(poly.clone()))
+            .collect();
+        
+        // Use batched commitment
+        let batched_commitments = params.batched_commit(
+            &fixed_coeffs.iter().collect::<Vec<_>>()
+        );
+        
+        // Convert back to affine form
+        batched_commitments
+            .into_iter()
+            .map(|commitment| commitment.to_affine())
+            .collect()
+    } else {
+        // Fallback to individual commitments
+        fixed
+            .iter()
+            .map(|poly| params.commit_lagrange(poly, Blind::default()).to_affine())
+            .collect()
+    };
 
     Ok(VerifyingKey::from_parts(
         domain,
