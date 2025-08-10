@@ -119,8 +119,8 @@ pub fn batched_multiexp_on_device<C: CurveAffine>(
     // In the future, this could be optimized to use a single GPU kernel for all batches
     let results: Vec<C::Curve> = coeffs_batches
         .par_iter()
-        .zip(bases_batches.par_iter())
-        .map(|(coeffs, bases)| multiexp_on_device(coeffs, bases))
+        .enumerate()
+        .map(|(i, coeffs)| multiexp_on_device(coeffs, bases_batches[i]))
         .collect();
     
     let elapsed = msm_start.elapsed();

@@ -136,10 +136,13 @@ impl GlobalMSMBatcher {
             
             // Extract operations and prepare for batched processing
             for operation in operations {
-                if let Ok(mut op) = operation.downcast::<MSMOperation<C>>() {
-                    coeffs_batches.push(op.coeffs.as_slice());
-                    bases_batches.push(op.bases.as_slice());
-                    operation_ids.push(op.id);
+                if let Ok(op) = operation.downcast::<MSMOperation<C>>() {
+                    let coeffs = op.coeffs.clone();
+                    let bases = op.bases.clone();
+                    let id = op.id;
+                    coeffs_batches.push(coeffs.as_slice());
+                    bases_batches.push(bases.as_slice());
+                    operation_ids.push(id);
                     operations_with_results.push(op);
                 }
             }

@@ -30,7 +30,8 @@ use super::mv_lookup as lookup;
 use maybe_rayon::iter::{IntoParallelIterator, IntoParallelRefIterator};
 
 // Add parallel iterator support for advice commitment optimization
-use maybe_rayon::iter::IntoParallelRefIterator;
+#[cfg(not(feature = "mv-lookup"))]
+use maybe_rayon::iter::{IntoParallelIterator, IntoParallelRefIterator};
 
 use crate::{
     arithmetic::{eval_polynomial, CurveAffine},
@@ -483,7 +484,7 @@ where
 
                 let transcript_start = Instant::now();
                 for commitment in &advice_commitments {
-                    transcript.write_point(*commitment)?;
+                    transcript.write_point((*commitment).into())?;
                 }
                 for ((column_index, advice_values), blind) in
                     column_indices.iter().zip(advice_values).zip(blinds)
