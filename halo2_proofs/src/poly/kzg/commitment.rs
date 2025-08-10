@@ -393,8 +393,8 @@ where
             let size = scalars.len();
             assert!(self.g.len() >= size);
             operations.push((
-                scalars.as_slice() as &[<E as Engine>::Fr],
-                &self.g[0..size] as &[<E as Engine>::G1Affine],
+                scalars.as_slice(),
+                &self.g[0..size],
             ));
         }
 
