@@ -389,11 +389,11 @@ where
         // Prepare batched operations
         let mut operations = Vec::new();
         for poly in polynomials {
-            let scalars: Vec<_> = poly.iter().collect();
+            let scalars: Vec<_> = poly.iter().cloned().collect();
             let size = scalars.len();
             assert!(self.g.len() >= size);
             operations.push((
-                scalars.as_slice(),
+                &scalars,
                 &self.g[0..size],
             ));
         }
