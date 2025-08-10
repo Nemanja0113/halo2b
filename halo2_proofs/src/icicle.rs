@@ -120,26 +120,13 @@ fn simd_scalar_conversion<G: PrimeField>(coeffs: &[G]) -> Vec<ScalarField> {
 fn optimize_memory_bandwidth<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> (Vec<ScalarField>, Vec<Affine<CurveCfg>>) {
     let start_time = Instant::now();
     
-    // Use staging buffers for better memory locality
-    let scalar_buffer = get_cpu_staging_buffer(coeffs.len() * 32); // 32 bytes per scalar
-    let point_buffer = get_cpu_staging_buffer(bases.len() * 64);   // 64 bytes per point
-    
-    // Sequential conversion with staging buffers (simplified without rayon)
-    let scalars = {
-        let result = simd_scalar_conversion(coeffs);
-        return_cpu_staging_buffer(scalar_buffer);
-        result
-    };
-    
-    let points = {
-        let result = simd_point_conversion(bases);
-        return_cpu_staging_buffer(point_buffer);
-        result
-    };
+    // Use original fast conversion path
+    let scalars = icicle_scalars_from_c_scalars(coeffs);
+    let points = icicle_points_from_c(bases);
     
     let elapsed = start_time.elapsed();
     if coeffs.len() > 10000 {
-        println!("      🚀 Memory-optimized conversion: {} elements in {:.2?} ({:.2} elements/ms)", 
+        println!("      🚀 Fast conversion: {} elements in {:.2?} ({:.2} elements/ms)", 
                  coeffs.len(), elapsed, coeffs.len() as f64 / elapsed.as_millis().max(1) as f64);
     }
     
@@ -597,7 +584,7 @@ pub fn multiexp_on_device<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> 
     let convert_start = std::time::Instant::now();
     let (scalars, points) = optimize_memory_bandwidth(coeffs, bases);
     let convert_elapsed = convert_start.elapsed();
-    println!("   ✅ Step 1 - REAL OPTIMIZED data conversion: {:.2?} ({:.2} elements/ms)", 
+    println!("   ✅ Step 1,2 - REAL OPTIMIZED data conversion: {:.2?} ({:.2} elements/ms)", 
              convert_elapsed, data_size as f64 / convert_elapsed.as_millis().max(1) as f64);
     
     // Step 3: Use memory pool for GPU allocation
@@ -611,14 +598,14 @@ pub fn multiexp_on_device<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> 
     let msm_config = get_optimized_msm_config(data_size);
     let gpu_result = execute_gpu_msm_with_streams::<C>(&scalars, &points, &msm_config);
     let gpu_elapsed = gpu_start.elapsed();
-    println!("   ✅ Step 2 - REAL OPTIMIZED GPU MSM computation: {:.2?} ({:.2} elements/ms)", 
+    println!("   ✅ Step 4 - REAL OPTIMIZED GPU MSM computation: {:.2?} ({:.2} elements/ms)", 
              gpu_elapsed, data_size as f64 / gpu_elapsed.as_millis().max(1) as f64);
     
     // Step 3: Convert result back to Halo2 format
     let convert_start = std::time::Instant::now();
     let msm_point = c_from_icicle_point::<C>(&gpu_result);
     let convert_elapsed = convert_start.elapsed();
-    println!("   ✅ Step 3 - Result conversion: {:.2?}", convert_elapsed);
+    println!("   ✅ Step 5 - Result conversion: {:.2?}", convert_elapsed);
     
     // Return memory to pool
     return_gpu_memory_to_pool(msm_results, 1);
@@ -626,8 +613,8 @@ pub fn multiexp_on_device<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> 
     // Note: Staging buffers are managed by the original conversion functions
     // The memory pooling optimization is still active through GPU memory pooling
     
-    // Check for memory defragmentation
-    check_and_defragment_gpu_memory();
+    // Check for memory defragmentation (disabled to avoid first-call overhead)
+    // check_and_defragment_gpu_memory();
     
     let total_elapsed = start_time.elapsed();
     println!("✅ [GPU_MSM_REAL_OPTIMIZED] Real bottleneck-optimized GPU MSM completed in {:.2?}", total_elapsed);
