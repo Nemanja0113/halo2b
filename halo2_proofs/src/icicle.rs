@@ -2,8 +2,6 @@ use group::ff::PrimeField;
 use icicle_bn254::curve::{CurveCfg, G1Projective, ScalarField};
 use halo2curves::bn256::Fr as Bn256Fr;
 use icicle_cuda_runtime::memory::{DeviceVec, HostSlice};
-use icicle_cuda_runtime::stream::CudaStream;
-use icicle_core::msm::MSMConfig;
 use crate::arithmetic::FftGroup;
 use std::any::{TypeId, Any};
 pub use halo2curves::CurveAffine;
@@ -14,316 +12,8 @@ use icicle_core::{
 };
 use maybe_rayon::iter::IntoParallelRefIterator;
 use maybe_rayon::iter::ParallelIterator;
+use maybe_rayon::prelude::ParallelSlice;
 use std::{env, mem};
-
-// GPU MSM Performance Optimization Imports
-use std::sync::Mutex;
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
-use lazy_static::lazy_static;
-
-// ============================================================================
-// REAL BOTTLENECK SOLUTIONS
-// ============================================================================
-
-// CPU Staging Buffers for Data Conversion (Real Bottleneck #1)
-lazy_static! {
-    static ref CPU_STAGING_BUFFERS: Mutex<HashMap<usize, Vec<Vec<u8>>>> = Mutex::new(HashMap::new());
-    static ref STREAM_COUNTER: AtomicUsize = AtomicUsize::new(0);
-}
-
-/// Get or create CPU staging buffer for data conversion
-fn get_cpu_staging_buffer(size: usize) -> Vec<u8> {
-    let mut buffers = CPU_STAGING_BUFFERS.lock().unwrap();
-    
-    if let Some(buffer_list) = buffers.get_mut(&size) {
-        if let Some(buffer) = buffer_list.pop() {
-            return buffer; // Reuse existing buffer
-        }
-    }
-    
-    // Create new buffer with padding for alignment
-    let aligned_size = ((size + 63) / 64) * 64; // 64-byte alignment
-    vec![0u8; aligned_size]
-}
-
-/// Return CPU staging buffer to pool
-fn return_cpu_staging_buffer(buffer: Vec<u8>) {
-    let size = buffer.len();
-    let mut buffers = CPU_STAGING_BUFFERS.lock().unwrap();
-    
-    // Keep only a reasonable number of buffers per size
-    let buffer_list = buffers.entry(size).or_insert_with(Vec::new);
-    if buffer_list.len() < 4 {
-        buffer_list.push(buffer);
-    }
-}
-
-/// Get or create GPU stream for parallel operations
-fn get_gpu_stream() -> CudaStream {
-    // Create new stream on demand (simplified approach)
-    // Note: In a production environment, you might want to implement a more sophisticated
-    // stream pool that doesn't require Send trait
-    CudaStream::create().unwrap()
-}
-
-/// Return GPU stream to pool (simplified - just let it drop)
-fn return_gpu_stream(_stream: CudaStream) {
-    // Stream will be automatically destroyed when dropped
-    // This is a simplified approach to avoid Send trait issues
-}
-
-// SIMD-Optimized Data Conversion (Real Bottleneck #2)
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
-
-#[cfg(target_arch = "x86_64")]
-fn simd_scalar_conversion<G: PrimeField>(coeffs: &[G]) -> Vec<ScalarField> {
-    let mut result = Vec::with_capacity(coeffs.len());
-    
-    // Use SIMD for bulk conversion
-    let simd_chunk_size = 8; // Process 8 elements at a time
-    let simd_chunks = coeffs.len() / simd_chunk_size;
-    
-    for i in 0..simd_chunks {
-        let start = i * simd_chunk_size;
-        let end = start + simd_chunk_size;
-        
-        // Process 8 elements with SIMD
-        for j in start..end {
-            let repr: [u32; 8] = unsafe { mem::transmute_copy(&coeffs[j].to_repr()) };
-            result.push(ScalarField::from(repr));
-        }
-    }
-    
-    // Handle remaining elements
-    for i in simd_chunks * simd_chunk_size..coeffs.len() {
-        let repr: [u32; 8] = unsafe { mem::transmute_copy(&coeffs[i].to_repr()) };
-        result.push(ScalarField::from(repr));
-    }
-    
-    result
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn simd_scalar_conversion<G: PrimeField>(coeffs: &[G]) -> Vec<ScalarField> {
-    // Fallback for non-x86_64 architectures
-    coeffs.iter().map(|coef| {
-        let repr: [u32; 8] = unsafe { mem::transmute_copy(&coef.to_repr()) };
-        ScalarField::from(repr)
-    }).collect()
-}
-
-// Memory Bandwidth Optimization (Real Bottleneck #3)
-fn optimize_memory_bandwidth<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> (Vec<ScalarField>, Vec<Affine<CurveCfg>>) {
-    let start_time = Instant::now();
-    
-    // Use original fast conversion path
-    let scalars = icicle_scalars_from_c_scalars(coeffs);
-    let points = icicle_points_from_c(bases);
-    
-    let elapsed = start_time.elapsed();
-    if coeffs.len() > 10000 {
-        println!("      🚀 Fast conversion: {} elements in {:.2?} ({:.2} elements/ms)", 
-                 coeffs.len(), elapsed, coeffs.len() as f64 / elapsed.as_millis().max(1) as f64);
-    }
-    
-    (scalars, points)
-}
-
-#[cfg(target_arch = "x86_64")]
-fn simd_point_conversion<C: CurveAffine>(bases: &[C]) -> Vec<Affine<CurveCfg>> {
-    let mut result = Vec::with_capacity(bases.len());
-    
-    // Use SIMD for bulk point conversion
-    let simd_chunk_size = 4; // Process 4 points at a time
-    let simd_chunks = bases.len() / simd_chunk_size;
-    
-    for i in 0..simd_chunks {
-        let start = i * simd_chunk_size;
-        let end = start + simd_chunk_size;
-        
-        // Process 4 points with SIMD
-        for j in start..end {
-            let coordinates = bases[j].coordinates().unwrap();
-            let x_repr: [u32; 8] = unsafe { mem::transmute_copy(&coordinates.x().to_repr()) };
-            let y_repr: [u32; 8] = unsafe { mem::transmute_copy(&coordinates.y().to_repr()) };
-            result.push(Affine::<CurveCfg>::from_limbs(x_repr, y_repr));
-        }
-    }
-    
-    // Handle remaining elements
-    for i in simd_chunks * simd_chunk_size..bases.len() {
-        let coordinates = bases[i].coordinates().unwrap();
-        let x_repr: [u32; 8] = unsafe { mem::transmute_copy(&coordinates.x().to_repr()) };
-        let y_repr: [u32; 8] = unsafe { mem::transmute_copy(&coordinates.y().to_repr()) };
-        result.push(Affine::<CurveCfg>::from_limbs(x_repr, y_repr));
-    }
-    
-    result
-}
-
-#[cfg(not(target_arch = "x86_64"))]
-fn simd_point_conversion<C: CurveAffine>(bases: &[C]) -> Vec<Affine<CurveCfg>> {
-    // Fallback for non-x86_64 architectures
-    bases.iter().map(|p| {
-        let coordinates = p.coordinates().unwrap();
-        let x_repr: [u32; 8] = unsafe { mem::transmute_copy(&coordinates.x().to_repr()) };
-        let y_repr: [u32; 8] = unsafe { mem::transmute_copy(&coordinates.y().to_repr()) };
-        Affine::<CurveCfg>::from_limbs(x_repr, y_repr)
-    }).collect()
-}
-
-// GPU Stream Management (Real Bottleneck #4)
-fn execute_gpu_msm_with_streams<C: CurveAffine>(
-    coeffs: &[ScalarField], 
-    bases: &[Affine<CurveCfg>], 
-    cfg: &MSMConfig
-) -> G1Projective {
-    let stream = get_gpu_stream();
-    
-    // Create device vectors
-    let mut coeffs_device = DeviceVec::<ScalarField>::cuda_malloc(coeffs.len()).unwrap();
-    let mut bases_device = DeviceVec::<Affine<CurveCfg>>::cuda_malloc(bases.len()).unwrap();
-    let mut result = DeviceVec::<G1Projective>::cuda_malloc(1).unwrap();
-    
-    // Copy data to GPU with stream
-    coeffs_device.copy_from_host_async(&HostSlice::from_slice(coeffs), &stream).unwrap();
-    bases_device.copy_from_host_async(&HostSlice::from_slice(bases), &stream).unwrap();
-    
-    // Create MSM config with stream
-    let mut stream_cfg = cfg.clone();
-    stream_cfg.ctx.stream = &stream;
-    stream_cfg.is_async = true;
-    
-    // Execute MSM with stream - use indexing to get DeviceSlice
-    msm::msm(&coeffs_device[..], &bases_device[..], &stream_cfg, &mut result[..]).unwrap();
-    
-    // Copy result back with stream
-    let mut host_result = vec![G1Projective::zero(); 1];
-    result.copy_to_host_async(&mut HostSlice::from_mut_slice(&mut host_result), &stream).unwrap();
-    
-    // Synchronize stream
-    stream.synchronize().unwrap();
-    
-    // Return stream to pool
-    return_gpu_stream(stream);
-    
-    host_result[0]
-}
-
-// Batch Processing Optimization (Real Bottleneck #5)
-fn optimize_batch_processing<C: CurveAffine>(
-    operations: &[(&[C::Scalar], &[C])]
-) -> Vec<C::Curve> {
-    let start_time = Instant::now();
-    let total_elements: usize = operations.iter().map(|(coeffs, _)| coeffs.len()).sum();
-    
-    println!("🚀 [BATCH_OPTIMIZED] Starting optimized batch processing:");
-    println!("   📊 Batch size: {} operations", operations.len());
-    println!("   📊 Total elements: {} elements", total_elements);
-    
-    // Process operations sequentially (simplified without rayon)
-    // Note: Each operation still uses its own GPU stream for async operations
-    
-    let results: Vec<C::Curve> = operations.iter()
-        .map(|(coeffs, bases)| {
-            // Use optimized conversion and GPU execution
-            let (scalars, points) = optimize_memory_bandwidth(coeffs, bases);
-            let cfg = get_optimized_msm_config(coeffs.len());
-            let gpu_result = execute_gpu_msm_with_streams::<C>(&scalars, &points, &cfg);
-            c_from_icicle_point::<C>(&gpu_result)
-        })
-        .collect();
-    
-    let elapsed = start_time.elapsed();
-    println!("✅ [BATCH_OPTIMIZED] Batch processing completed in {:.2?}", elapsed);
-    println!("   ⚡ Throughput: {:.2} operations/ms", 
-             operations.len() as f64 / elapsed.as_millis().max(1) as f64);
-    println!("   ⚡ Element throughput: {:.2} elements/ms", 
-             total_elements as f64 / elapsed.as_millis().max(1) as f64);
-    
-    results
-}
-
-// GPU MSM Performance Optimization Structures
-lazy_static! {
-    static ref GPU_MEMORY_POOL: Mutex<HashMap<usize, Vec<DeviceVec<G1Projective>>>> = Mutex::new(HashMap::new());
-    static ref OPERATION_COUNTER: AtomicUsize = AtomicUsize::new(0);
-    static ref GPU_TEMP_LAST_CHECK: Mutex<Instant> = Mutex::new(Instant::now());
-}
-
-// GPU Memory Pool Management Functions
-fn get_or_allocate_gpu_memory(size: usize) -> DeviceVec<G1Projective> {
-    let mut pool = GPU_MEMORY_POOL.lock().unwrap();
-    
-    if let Some(memory_list) = pool.get_mut(&size) {
-        if let Some(memory) = memory_list.pop() {
-            return memory;
-        }
-    }
-    
-    // Allocate new memory if pool is empty
-    DeviceVec::<G1Projective>::cuda_malloc(size).unwrap()
-}
-
-fn return_gpu_memory_to_pool(memory: DeviceVec<G1Projective>, size: usize) {
-    let mut pool = GPU_MEMORY_POOL.lock().unwrap();
-    pool.entry(size).or_insert_with(Vec::new).push(memory);
-}
-
-// Note: Staging buffer management is handled by the existing conversion functions
-// GPU memory pooling provides the main optimization benefits
-
-// GPU Memory Defragmentation
-fn check_and_defragment_gpu_memory() {
-    let counter = OPERATION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    
-    if counter % 100 == 0 {
-        println!("🧹 [GPU_MEMORY] Defragmenting GPU memory");
-        
-        // Clear memory pool to prevent fragmentation
-        // Note: GPU synchronization is handled by the MSM operation itself
-        {
-            let mut pool = GPU_MEMORY_POOL.lock().unwrap();
-            pool.clear();
-        }
-    }
-}
-
-// GPU Temperature Monitoring (Placeholder)
-fn check_gpu_temperature() -> Option<u32> {
-    let mut last_check = GPU_TEMP_LAST_CHECK.lock().unwrap();
-    if last_check.elapsed() < Duration::from_secs(10) {
-        return None;
-    }
-    *last_check = Instant::now();
-    drop(last_check);
-    
-    // Placeholder temperature reading
-    // In practice, this would use CUDA driver APIs or system calls
-    // For now, we'll just log that we're monitoring
-    println!("🌡️  [GPU_TEMP] Temperature monitoring active");
-    
-    None // Return None to indicate no temperature reading available
-}
-
-// Optimized MSM Configuration
-fn get_optimized_msm_config(data_size: usize) -> msm::MSMConfig<'static> {
-    let mut config = msm::MSMConfig::default();
-    
-    // Note: MSMConfig fields are private, so we use the default configuration
-    // The optimization will be handled through other means like memory pooling
-    // and temperature monitoring rather than MSM configuration changes
-    
-    // Log the data size for monitoring purposes
-    if data_size > 1000000 {
-        println!("📊 [MSM_CONFIG] Large data size: {} elements", data_size);
-    }
-    
-    config
-}
 
 pub fn should_use_cpu_msm(size: usize) -> bool {
     size <= (1
@@ -408,9 +98,6 @@ fn try_zero_copy_scalar_conversion<G: PrimeField>(coeffs: &[G]) -> Result<Vec<Sc
     // For now, we'll fall back to the optimized conversion
     Err("Zero-copy not implemented for this field type")
 }
-
-// Note: SIMD optimizations are handled within the existing conversion functions
-// The main optimizations are GPU memory pooling, temperature monitoring, and defragmentation
 
 // Optimization: Batch conversion for multiple operations
 pub fn batch_icicle_scalars_from_c_scalars<G: PrimeField>(
@@ -530,102 +217,65 @@ pub fn multiexp_on_device<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> 
     let start_time = std::time::Instant::now();
     let data_size = coeffs.len();
     
-    println!("🚀 [GPU_MSM_OPTIMIZED] Starting optimized GPU MSM operation:");
+    println!("🚀 [GPU_MSM] Starting GPU MSM operation:");
     println!("   📊 Data size: {} elements", data_size);
     
-    // Check GPU temperature before starting
-    check_gpu_temperature();
+    // Step 1: Convert scalars to GPU format
+    let scalar_start = std::time::Instant::now();
+    let binding = icicle_scalars_from_c_scalars::<C::ScalarExt>(coeffs);
+    let coeffs = HostSlice::from_slice(&binding[..]);
+    let scalar_elapsed = scalar_start.elapsed();
+    println!("   ✅ Step 1 - Scalar conversion: {:.2?} ({:.2} elements/ms)", 
+             scalar_elapsed, data_size as f64 / scalar_elapsed.as_millis().max(1) as f64);
     
-    // Optional: compute lightweight fingerprints to confirm data identity across calls
-    if std::env::var("HALO2_MSM_FINGERPRINT").ok().as_deref() == Some("1") {
-        use ff::PrimeField;
-        use std::hash::{Hash, Hasher};
-        use std::collections::hash_map::DefaultHasher;
-
-        let sample_stride = (data_size / 65536).max(1); // sample up to ~65k elements
-
-        let mut scalar_hasher = DefaultHasher::new();
-        let mut sampled_scalars = 0usize;
-        for (idx, s) in coeffs.iter().enumerate().step_by(sample_stride) {
-            let repr = s.to_repr();
-            repr.as_ref().hash(&mut scalar_hasher);
-            sampled_scalars += 1;
-        }
-        let scalar_fp = scalar_hasher.finish();
-
-        let mut point_hasher = DefaultHasher::new();
-        let mut sampled_points = 0usize;
-        for (idx, p) in bases.iter().enumerate().step_by(sample_stride) {
-            let coords_opt = p.coordinates();
-            if coords_opt.is_some().into() {
-                let coords = coords_opt.unwrap();
-                coords.x().to_repr().as_ref().hash(&mut point_hasher);
-                coords.y().to_repr().as_ref().hash(&mut point_hasher);
-            } else {
-                // Point at infinity marker
-                0xFFFFu16.hash(&mut point_hasher);
-            }
-            sampled_points += 1;
-        }
-        let point_fp = point_hasher.finish();
-
-        println!(
-            "   🧪 Scalars fingerprint: 0x{:016x} | sampled={} stride={} (HALO2_MSM_FINGERPRINT=1)",
-            scalar_fp, sampled_scalars, sample_stride
-        );
-        println!(
-            "   🧪 Bases   fingerprint: 0x{:016x} | sampled={} stride={} (HALO2_MSM_FINGERPRINT=1)",
-            point_fp, sampled_points, sample_stride
-        );
-    }
+    // Step 2: Convert points to GPU format
+    let point_start = std::time::Instant::now();
+    let binding = icicle_points_from_c(bases);
+    let bases = HostSlice::from_slice(&binding[..]);
+    let point_elapsed = point_start.elapsed();
+    println!("   ✅ Step 2 - Point conversion: {:.2?} ({:.2} elements/ms)", 
+             point_elapsed, data_size as f64 / point_elapsed.as_millis().max(1) as f64);
     
-    // REAL BOTTLENECK SOLUTION #1: Optimized data conversion with staging buffers and SIMD
-    let convert_start = std::time::Instant::now();
-    let (scalars, points) = optimize_memory_bandwidth(coeffs, bases);
-    let convert_elapsed = convert_start.elapsed();
-    println!("   ✅ Step 1,2 - REAL OPTIMIZED data conversion: {:.2?} ({:.2} elements/ms)", 
-             convert_elapsed, data_size as f64 / convert_elapsed.as_millis().max(1) as f64);
-    
-    // Step 3: Use memory pool for GPU allocation
+    // Step 3: Allocate GPU memory
     let alloc_start = std::time::Instant::now();
-    let mut msm_results = get_or_allocate_gpu_memory(1);
+    let mut msm_results = DeviceVec::<G1Projective>::cuda_malloc(1).unwrap();
+    let cfg = msm::MSMConfig::default();
     let alloc_elapsed = alloc_start.elapsed();
-    println!("   ✅ Step 3 - GPU memory allocation (pooled): {:.2?}", alloc_elapsed);
+    println!("   ✅ Step 3 - GPU memory allocation: {:.2?}", alloc_elapsed);
     
-    // REAL BOTTLENECK SOLUTION #2: GPU MSM computation with stream management
+    // Step 4: Execute GPU MSM
     let gpu_start = std::time::Instant::now();
-    let msm_config = get_optimized_msm_config(data_size);
-    let gpu_result = execute_gpu_msm_with_streams::<C>(&scalars, &points, &msm_config);
+    msm::msm(coeffs, bases, &cfg, &mut msm_results[..]).unwrap();
     let gpu_elapsed = gpu_start.elapsed();
-    println!("   ✅ Step 4 - REAL OPTIMIZED GPU MSM computation: {:.2?} ({:.2} elements/ms)", 
+    println!("   ✅ Step 4 - GPU MSM computation: {:.2?} ({:.2} elements/ms)", 
              gpu_elapsed, data_size as f64 / gpu_elapsed.as_millis().max(1) as f64);
     
-    // Step 3: Convert result back to Halo2 format
+    // Step 5: Copy result back to CPU
+    let copy_start = std::time::Instant::now();
+    let mut msm_host_result = vec![G1Projective::zero(); 1];
+    msm_results
+        .copy_to_host(HostSlice::from_mut_slice(&mut msm_host_result[..]))
+        .unwrap();
+    let copy_elapsed = copy_start.elapsed();
+    println!("   ✅ Step 5 - GPU to CPU copy: {:.2?}", copy_elapsed);
+    
+    // Step 6: Convert result back to Halo2 format
     let convert_start = std::time::Instant::now();
-    let msm_point = c_from_icicle_point::<C>(&gpu_result);
+    let msm_point = c_from_icicle_point::<C>(&msm_host_result[0]);
     let convert_elapsed = convert_start.elapsed();
-    println!("   ✅ Step 5 - Result conversion: {:.2?}", convert_elapsed);
-    
-    // Return memory to pool
-    return_gpu_memory_to_pool(msm_results, 1);
-    
-    // Note: Staging buffers are managed by the original conversion functions
-    // The memory pooling optimization is still active through GPU memory pooling
-    
-    // Check for memory defragmentation (disabled to avoid first-call overhead)
-    // check_and_defragment_gpu_memory();
+    println!("   ✅ Step 6 - Result conversion: {:.2?}", convert_elapsed);
     
     let total_elapsed = start_time.elapsed();
-    println!("✅ [GPU_MSM_REAL_OPTIMIZED] Real bottleneck-optimized GPU MSM completed in {:.2?}", total_elapsed);
+    println!("✅ [GPU_MSM] GPU MSM completed in {:.2?}", total_elapsed);
     println!("   ⚡ Total throughput: {:.2} elements/ms", 
              data_size as f64 / total_elapsed.as_millis().max(1) as f64);
-    println!("   📊 REAL OPTIMIZATION breakdown:");
-    println!("      - Data conversion (SIMD + staging): {:.1}%", 
-             convert_elapsed.as_millis() as f64 / total_elapsed.as_millis() as f64 * 100.0);
-    println!("      - GPU computation (streams): {:.1}%", 
+    println!("   📊 Breakdown:");
+    println!("      - Data conversion: {:.1}%", 
+             (scalar_elapsed + point_elapsed).as_millis() as f64 / total_elapsed.as_millis() as f64 * 100.0);
+    println!("      - GPU computation: {:.1}%", 
              gpu_elapsed.as_millis() as f64 / total_elapsed.as_millis() as f64 * 100.0);
-    println!("      - Memory operations (pooled): {:.1}%", 
-             (alloc_elapsed + convert_elapsed).as_millis() as f64 / total_elapsed.as_millis() as f64 * 100.0);
+    println!("      - Memory operations: {:.1}%", 
+             (alloc_elapsed + copy_elapsed + convert_elapsed).as_millis() as f64 / total_elapsed.as_millis() as f64 * 100.0);
     
     msm_point
 }
@@ -638,8 +288,117 @@ pub fn batched_multiexp_on_device<C: CurveAffine>(
         return vec![];
     }
 
-    // Use the real bottleneck-optimized batch processing
-    optimize_batch_processing(operations)
+    let start_time = std::time::Instant::now();
+    let total_elements: usize = operations.iter().map(|(coeffs, _)| coeffs.len()).sum();
+    println!("🚀 [GPU_BATCHED_MSM] Starting batched GPU MSM:");
+    println!("   📊 Batch size: {} operations", operations.len());
+    println!("   📊 Total elements: {} elements", total_elements);
+    
+    // Step 1: Collect all scalars and bases
+    let collect_start = std::time::Instant::now();
+    let mut all_scalars = Vec::new();
+    let mut all_bases = Vec::new();
+    let mut operation_sizes = Vec::new();
+    
+    for (coeffs, bases) in operations {
+        operation_sizes.push(coeffs.len());
+        all_scalars.extend_from_slice(coeffs);
+        all_bases.extend_from_slice(bases);
+    }
+    let collect_elapsed = collect_start.elapsed();
+    println!("   ✅ Step 1 - Data collection: {:.2?} ({:.2} elements/ms)", 
+             collect_elapsed, total_elements as f64 / collect_elapsed.as_millis().max(1) as f64);
+    
+    // Step 2: Convert scalars to GPU format
+    let scalar_start = std::time::Instant::now();
+    let binding = icicle_scalars_from_c_scalars::<C::ScalarExt>(&all_scalars);
+    let coeffs = HostSlice::from_slice(&binding[..]);
+    let scalar_elapsed = scalar_start.elapsed();
+    println!("   ✅ Step 2 - Scalar conversion: {:.2?} ({:.2} elements/ms)", 
+             scalar_elapsed, total_elements as f64 / scalar_elapsed.as_millis().max(1) as f64);
+    
+    // Step 3: Convert points to GPU format
+    let point_start = std::time::Instant::now();
+    let binding = icicle_points_from_c(&all_bases);
+    let bases = HostSlice::from_slice(&binding[..]);
+    let point_elapsed = point_start.elapsed();
+    println!("   ✅ Step 3 - Point conversion: {:.2?} ({:.2} elements/ms)", 
+             point_elapsed, total_elements as f64 / point_elapsed.as_millis().max(1) as f64);
+    
+    // Step 4: Initialize MSM configuration
+    let alloc_start = std::time::Instant::now();
+    let cfg = msm::MSMConfig::default();
+    let alloc_elapsed = alloc_start.elapsed();
+    println!("   ✅ Step 4 - MSM configuration: {:.2?}", alloc_elapsed);
+    
+    // Step 5: Initialize results array
+    let copy_start = std::time::Instant::now();
+    let mut msm_host_results = vec![G1Projective::zero(); operations.len()];
+    let copy_elapsed = copy_start.elapsed();
+    println!("   ✅ Step 5 - Results array initialization: {:.2?}", copy_elapsed);
+    
+    // Step 6: Process each operation
+    let gpu_start = std::time::Instant::now();
+    let mut offset_scalars = 0;
+    let mut offset_bases = 0;
+    
+    for (i, &size) in operation_sizes.iter().enumerate() {
+        let op_start = std::time::Instant::now();
+        
+        // Create slices using the correct API
+        let coeffs_slice = HostSlice::from_slice(&coeffs.as_slice()[offset_scalars..offset_scalars + size]);
+        let bases_slice = HostSlice::from_slice(&bases.as_slice()[offset_bases..offset_bases + size]);
+        
+        // For single result, we need to create a new DeviceVec for each operation
+        let mut single_result = DeviceVec::<G1Projective>::cuda_malloc(1).unwrap();
+        
+        msm::msm(coeffs_slice, bases_slice, &cfg, &mut single_result[..]).unwrap();
+        
+        // Copy the single result to the appropriate position in the main results array
+        let mut host_result = vec![G1Projective::zero(); 1];
+        single_result
+            .copy_to_host(HostSlice::from_mut_slice(&mut host_result[..]))
+            .unwrap();
+        
+        // Store in the main results array
+        msm_host_results[i] = host_result[0];
+        
+        let op_elapsed = op_start.elapsed();
+        println!("      📦 Operation {}: {} elements in {:.2?} ({:.2} elements/ms)", 
+                 i, size, op_elapsed, size as f64 / op_elapsed.as_millis().max(1) as f64);
+        
+        offset_scalars += size;
+        offset_bases += size;
+    }
+    
+    let gpu_elapsed = gpu_start.elapsed();
+    println!("   ✅ Step 6 - GPU MSM computation: {:.2?} ({:.2} elements/ms)", 
+             gpu_elapsed, total_elements as f64 / gpu_elapsed.as_millis().max(1) as f64);
+    
+    // Step 7: Convert results back to Halo2 format
+    let convert_start = std::time::Instant::now();
+    let results: Vec<C::Curve> = msm_host_results
+        .iter()
+        .map(|point| c_from_icicle_point::<C>(point))
+        .collect();
+    let convert_elapsed = convert_start.elapsed();
+    println!("   ✅ Step 7 - Result conversion: {:.2?}", convert_elapsed);
+    
+    let total_elapsed = start_time.elapsed();
+    println!("✅ [GPU_BATCHED_MSM] Batched GPU MSM completed in {:.2?}", total_elapsed);
+    println!("   ⚡ Total throughput: {:.2} operations/ms", 
+             operations.len() as f64 / total_elapsed.as_millis().max(1) as f64);
+    println!("   ⚡ Element throughput: {:.2} elements/ms", 
+             total_elements as f64 / total_elapsed.as_millis().max(1) as f64);
+    println!("   📊 Breakdown:");
+    println!("      - Data preparation: {:.1}%", 
+             (collect_elapsed + scalar_elapsed + point_elapsed).as_millis() as f64 / total_elapsed.as_millis() as f64 * 100.0);
+    println!("      - GPU computation: {:.1}%", 
+             gpu_elapsed.as_millis() as f64 / total_elapsed.as_millis() as f64 * 100.0);
+    println!("      - Memory operations: {:.1}%", 
+             (alloc_elapsed + copy_elapsed + convert_elapsed).as_millis() as f64 / total_elapsed.as_millis() as f64 * 100.0);
+
+    results
 }
 
 pub fn fft_on_device<Scalar: ff::PrimeField, G: FftGroup<Scalar> + ff::PrimeField>(
