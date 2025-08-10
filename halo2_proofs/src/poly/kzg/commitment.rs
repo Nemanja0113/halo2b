@@ -393,7 +393,7 @@ where
             let size = scalars.len();
             assert!(self.g.len() >= size);
             operations.push((
-                &scalars,
+                scalars.as_slice(),
                 &self.g[0..size],
             ));
         }
