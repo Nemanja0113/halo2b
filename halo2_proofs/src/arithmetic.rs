@@ -10,8 +10,6 @@ use std::any::TypeId;
 
 #[cfg(feature = "icicle_gpu")]
 use super::icicle;
-#[cfg(feature = "icicle_gpu")]
-use std::env;
 use super::multicore;
 pub use ff::Field;
 use group::{
@@ -915,9 +913,16 @@ impl GlobalMSMBatcher {
     pub fn flush_operations<C: CurveAffine>() -> Vec<usize> {
         let operations = PENDING_MSM_OPERATIONS.with(|pending| {
             let mut ops = pending.borrow_mut();
-            let filtered_ops: Vec<_> = ops.drain_filter(|op| {
-                op.curve_type == std::any::TypeId::of::<C>()
-            }).collect();
+            // Use stable alternative to drain_filter
+            let mut filtered_ops = Vec::new();
+            let mut i = 0;
+            while i < ops.len() {
+                if std::any::TypeId::of::<C>() == ops[i].curve_type {
+                    filtered_ops.push(ops.remove(i));
+                } else {
+                    i += 1;
+                }
+            }
             filtered_ops
         });
         
