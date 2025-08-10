@@ -775,11 +775,8 @@ where
                             &chunk_coeffs.iter().collect::<Vec<_>>()
                         );
                         
-                        // Convert back to projective form
+                        // batched_commit already returns projective points
                         batched_commitments
-                            .into_iter()
-                            .map(|commitment| commitment.to_projective())
-                            .collect::<Vec<_>>()
                     } else {
                         // Fallback to individual commitments
                         chunk
