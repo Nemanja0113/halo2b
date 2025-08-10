@@ -18,7 +18,7 @@ use crate::{
     circuit::Value,
     poly::{
         batch_invert_assigned,
-        commitment::{Blind, Params, ParamsProver},
+        commitment::{Blind, Params},
         EvaluationDomain,
     },
 };
@@ -215,7 +215,7 @@ pub fn keygen_vk<'params, C, P, ConcreteCircuit>(
 ) -> Result<VerifyingKey<C>, Error>
 where
     C: CurveAffine,
-    P: Params<'params, C> + ParamsProver<'params, C>,
+    P: Params<'params, C>,
     ConcreteCircuit: Circuit<C::Scalar>,
     C::Scalar: FromUniformBytes<64>,
 {
@@ -232,7 +232,7 @@ pub fn keygen_vk_custom<'params, C, P, ConcreteCircuit>(
 ) -> Result<VerifyingKey<C>, Error>
 where
     C: CurveAffine,
-    P: Params<'params, C> + ParamsProver<'params, C>,
+    P: Params<'params, C>,
     ConcreteCircuit: Circuit<C::Scalar>,
     C::Scalar: FromUniformBytes<64>,
 {
@@ -281,36 +281,10 @@ where
         .permutation
         .build_vk(params, &domain, &cs.permutation);
 
-    // Use batched commitment for fixed polynomials if enabled
-    let use_batching = std::env::var("HALO2_MSM_BATCHING")
-        .unwrap_or_else(|_| "1".to_string())
-        .parse::<bool>()
-        .unwrap_or(true);
-
-    let fixed_commitments = if use_batching {
-        // Convert to coefficient form for batched commitment
-        let fixed_coeffs: Vec<_> = fixed
-            .iter()
-            .map(|poly| domain.lagrange_to_coeff(poly.clone()))
-            .collect();
-        
-        // Use batched commitment
-        let batched_commitments = params.batched_commit(
-            &fixed_coeffs.iter().collect::<Vec<_>>()
-        );
-        
-        // Convert back to affine form
-        batched_commitments
-            .into_iter()
-            .map(|commitment| commitment.to_affine())
-            .collect()
-    } else {
-        // Fallback to individual commitments
-        fixed
-            .iter()
-            .map(|poly| params.commit_lagrange(poly, Blind::default()).to_affine())
-            .collect()
-    };
+    let fixed_commitments = fixed
+        .iter()
+        .map(|poly| params.commit_lagrange(poly, Blind::default()).to_affine())
+        .collect();
 
     Ok(VerifyingKey::from_parts(
         domain,
@@ -330,7 +304,7 @@ pub fn keygen_pk<'params, C, P, ConcreteCircuit>(
 ) -> Result<ProvingKey<C>, Error>
 where
     C: CurveAffine,
-    P: Params<'params, C> + ParamsProver<'params, C>,
+    P: Params<'params, C>,
     ConcreteCircuit: Circuit<C::Scalar>,
 {
     let mut cs = ConstraintSystem::default();

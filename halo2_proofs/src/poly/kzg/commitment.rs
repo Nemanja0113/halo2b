@@ -366,57 +366,6 @@ where
         best_multiexp(&scalars, &bases[0..size])
     }
 
-    /// Batched commitment for multiple polynomials
-    fn batched_commit(&self, polynomials: &[&Polynomial<E::Fr, Coeff>]) -> Vec<E::G1> {
-        if polynomials.is_empty() {
-            return Vec::new();
-        }
-
-        println!("🔐 [BATCHED_COMMIT] Starting batched commitment for {} polynomials", polynomials.len());
-
-        // Check if batching is enabled via environment variable
-        let use_batching = std::env::var("HALO2_MSM_BATCHING")
-            .unwrap_or_else(|_| "1".to_string())
-            .parse::<bool>()
-            .unwrap_or(true);
-
-        println!("🔍 [BATCHED_COMMIT] Batching enabled: {}", use_batching);
-
-        if !use_batching {
-            // Fallback to individual commitments
-            println!("   💻 Using individual commitments (batching disabled)");
-            return polynomials
-                .iter()
-                .map(|poly| self.commit(poly, Blind::default()))
-                .collect();
-        }
-
-        // Prepare batched operations
-        let mut scalars_vecs = Vec::new();
-        let mut operations = Vec::new();
-        
-        for poly in polynomials {
-            let scalars: Vec<_> = poly.iter().cloned().collect();
-            let size = scalars.len();
-            assert!(self.g.len() >= size);
-            scalars_vecs.push(scalars);
-        }
-        
-        for (i, poly) in polynomials.iter().enumerate() {
-            let size = poly.len();
-            operations.push((
-                scalars_vecs[i].as_slice(),
-                &self.g[0..size],
-            ));
-        }
-
-        // Use batched MSM
-        println!("   🚀 Calling batched MSM operations with {} operations", operations.len());
-        let results = crate::arithmetic::batched_msm_operations(&operations);
-        println!("✅ [BATCHED_COMMIT] Batched commitment completed with {} results", results.len());
-        results
-    }
-
     fn get_g(&self) -> &[E::G1Affine] {
         &self.g
     }

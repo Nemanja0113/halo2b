@@ -88,15 +88,6 @@ pub trait ParamsProver<'params, C: CurveAffine>: Params<'params, C> {
     fn commit(&self, poly: &Polynomial<C::ScalarExt, Coeff>, r: Blind<C::ScalarExt>)
         -> C::CurveExt;
 
-    /// Batched commitment for multiple polynomials
-    fn batched_commit(&self, polynomials: &[&Polynomial<C::ScalarExt, Coeff>]) -> Vec<C::CurveExt> {
-        // Default implementation: fallback to individual commitments
-        polynomials
-            .iter()
-            .map(|poly| self.commit(poly, Blind::default()))
-            .collect()
-    }
-
     /// Getter for g generators
     fn get_g(&self) -> &[C];
 

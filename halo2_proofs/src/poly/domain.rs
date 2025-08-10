@@ -2,7 +2,7 @@
 //! domain that is of a suitable size for the application.
 
 use crate::{
-    arithmetic::{best_fft, optimized_fft, parallelize},
+    arithmetic::{best_fft, parallelize},
     fft::recursive::FFTData,
     plonk::Assigned,
 };
@@ -418,7 +418,7 @@ impl<F: WithSmallOrderMulGroup<3>> EvaluationDomain<F> {
 
         self.distribute_powers(&mut a.values, self.g_coset * extended_omega_factor);
         let data = self.get_fft_data(a.len());
-        optimized_fft(&mut a.values, self.omega, self.k, data, false);
+        best_fft(&mut a.values, self.omega, self.k, data, false);
 
         Polynomial {
             values: a.values,

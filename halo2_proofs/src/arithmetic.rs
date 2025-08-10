@@ -1,16 +1,10 @@
 //! This module provides common utilities, traits and structures for group,
 //! field and polynomial arithmetic.
 
-use std::collections::HashMap;
-use std::env;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
-use std::thread_local;
-use std::any::TypeId;
-use lazy_static::lazy_static;
-
 #[cfg(feature = "icicle_gpu")]
 use super::icicle;
+#[cfg(feature = "icicle_gpu")]
+use std::env;
 use super::multicore;
 pub use ff::Field;
 use group::{
@@ -39,59 +33,12 @@ where
 
 /// Best MSM
 pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
-    // Check if global MSM batching is enabled
-    if GlobalMSMBatcher::is_batching_enabled() {
-        let batch_threshold = GlobalMSMBatcher::get_batch_threshold();
-        let pending_count = GlobalMSMBatcher::pending_count();
-        
-        // Add current operation to the batch
-        let operation_id = GlobalMSMBatcher::add_operation(coeffs, bases);
-        
-        // If we have enough pending operations, flush the batch
-        if pending_count + 1 >= batch_threshold {
-            println!("🔄 [GLOBAL_MSM_BATCH] Flushing batch with {} operations", pending_count + 1);
-            let completed_ids = GlobalMSMBatcher::flush_operations::<C>();
-            
-            // Try to get our result
-            if let Some(result) = GlobalMSMBatcher::get_result::<C>(operation_id) {
-                println!("   ✅ Retrieved batched result for operation {}", operation_id);
-                return result;
-            } else {
-                println!("   ⚠️  Result not found, falling back to immediate execution");
-            }
-        } else {
-            println!("📦 [GLOBAL_MSM_BATCH] Added operation {} to pending batch ({} total)", 
-                    operation_id, pending_count + 1);
-            
-            // Check if we can get a result from a previous batch
-            if let Some(result) = GlobalMSMBatcher::get_result::<C>(operation_id) {
-                println!("   ✅ Retrieved cached result for operation {}", operation_id);
-                return result;
-            }
-            
-            // For now, execute immediately since we don't have async result handling
-            println!("   ⚠️  Immediate execution (async result handling not implemented)");
-        }
-    }
-    
     #[cfg(feature = "icicle_gpu")]
+    if env::var("ENABLE_ICICLE_GPU").is_ok()
+        && !icicle::should_use_cpu_msm(coeffs.len())
+        && icicle::is_gpu_supported_field(&coeffs[0])
     {
-        let enable_gpu = env::var("ENABLE_ICICLE_GPU").is_ok();
-        let should_use_cpu = icicle::should_use_cpu_msm(coeffs.len());
-        let gpu_supported = icicle::is_gpu_supported_field(&coeffs[0]);
-        
-        println!("🔍 [MSM_DISPATCH] MSM dispatch decision:");
-        println!("   📊 Data size: {} elements", coeffs.len());
-        println!("   ⚙️  ENABLE_ICICLE_GPU: {}", enable_gpu);
-        println!("   🧵 Should use CPU: {}", should_use_cpu);
-        println!("   🔧 GPU supported field: {}", gpu_supported);
-        
-        if enable_gpu && !should_use_cpu && gpu_supported {
-            println!("   🚀 Using GPU MSM");
-            return best_multiexp_gpu(coeffs, bases);
-        } else {
-            println!("   💻 Using CPU MSM");
-        }
+        return best_multiexp_gpu(coeffs, bases);
     }
 
     #[cfg(feature = "metal")]
@@ -127,37 +74,13 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
 ///
 /// This will use multithreading if beneficial.
 pub fn best_multiexp_cpu<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
-    let start_time = std::time::Instant::now();
-    let data_size = coeffs.len();
-    
-    println!("🖥️  [CPU_MSM] Starting CPU MSM operation:");
-    println!("   📊 Data size: {} elements", data_size);
-    println!("   🧵 Using CPU parallel processing");
-    
-    let msm_start = std::time::Instant::now();
-    let result = msm_best(coeffs, bases);
-    let msm_elapsed = msm_start.elapsed();
-    
-    let total_elapsed = start_time.elapsed();
-    println!("✅ [CPU_MSM] CPU MSM completed in {:.2?}", total_elapsed);
-    println!("   ⚡ MSM computation: {:.2?} ({:.2} elements/ms)", 
-             msm_elapsed, data_size as f64 / msm_elapsed.as_millis().max(1) as f64);
-    println!("   ⚡ Total throughput: {:.2} elements/ms", 
-             data_size as f64 / total_elapsed.as_millis().max(1) as f64);
-    
-    result
+    msm_best(coeffs, bases)
 }
 
 #[cfg(feature = "icicle_gpu")]
 /// Performs a multi-exponentiation operation on GPU using Icicle library
 pub fn best_multiexp_gpu<C: CurveAffine>(coeffs: &[C::Scalar], g: &[C]) -> C::Curve {
-    let start_time = std::time::Instant::now();
-    let data_size = coeffs.len();
-    let result = icicle::multiexp_on_device::<C>(coeffs, g);
-    
-    let elapsed = start_time.elapsed();
-    
-    result
+    icicle::multiexp_on_device::<C>(coeffs, g)
 }
 
 /// Dispatcher
@@ -168,24 +91,7 @@ pub fn best_fft_cpu<Scalar: Field, G: FftGroup<Scalar>>(
     data: &FFTData<Scalar>,
     inverse: bool,
 ) {
-    let start_time = std::time::Instant::now();
-    let data_size = a.len();
-    
-    println!("🖥️  [CPU_FFT] Starting CPU FFT operation:");
-    println!("   📊 Data size: {} elements", data_size);
-    println!("   ⚙️  Log_n: {}", log_n);
-    println!("   🔄 Inverse: {}", inverse);
-    
-    let fft_start = std::time::Instant::now();
     fft::fft(a, omega, log_n, data, inverse);
-    let fft_elapsed = fft_start.elapsed();
-    
-    let total_elapsed = start_time.elapsed();
-    println!("✅ [CPU_FFT] CPU FFT completed in {:.2?}", total_elapsed);
-    println!("   ⚡ FFT computation: {:.2?} ({:.2} elements/ms)", 
-             fft_elapsed, data_size as f64 / fft_elapsed.as_millis().max(1) as f64);
-    println!("   ⚡ Total throughput: {:.2} elements/ms", 
-             data_size as f64 / total_elapsed.as_millis().max(1) as f64);
 }
 
 /// Best FFT
@@ -197,24 +103,13 @@ pub fn best_fft<Scalar: Field + ff::PrimeField, G: FftGroup<Scalar> + ff::PrimeF
     inverse: bool,
 ) {
     #[cfg(feature = "icicle_gpu")]
+    if env::var("ENABLE_ICICLE_GPU").is_ok()
+        && !icicle::should_use_cpu_fft(scalars.len())
+        && icicle::is_gpu_supported_field(&omega)
     {
-        let enable_gpu = env::var("ENABLE_ICICLE_GPU").is_ok();
-        let should_use_cpu = icicle::should_use_cpu_fft(scalars.len());
-        let gpu_supported = icicle::is_gpu_supported_field(&omega);
-        
-        println!("🔍 [FFT_DISPATCH] FFT dispatch decision:");
-        println!("   📊 Data size: {} elements", scalars.len());
-        println!("   ⚙️  ENABLE_ICICLE_GPU: {}", enable_gpu);
-        println!("   🧵 Should use CPU: {}", should_use_cpu);
-        println!("   🔧 GPU supported field: {}", gpu_supported);
-        
-        if enable_gpu && !should_use_cpu && gpu_supported {
-            println!("   🚀 Using GPU FFT");
-            best_fft_gpu(scalars, omega, log_n, inverse);
-        } else {
-            println!("   💻 Using CPU FFT");
-            best_fft_cpu(scalars, omega, log_n, data, inverse);
-        }
+        best_fft_gpu(scalars, omega, log_n, inverse);
+    } else {
+        best_fft_cpu(scalars, omega, log_n, data, inverse);
     }
 
     #[cfg(not(feature = "icicle_gpu"))]
@@ -229,64 +124,30 @@ pub fn best_fft_gpu<Scalar: Field + ff::PrimeField, G: FftGroup<Scalar> + ff::Pr
     log_n: u32,
     inverse: bool,
 ) {
-    let start_time = std::time::Instant::now();
-    let data_size = a.len();
-    println!("🚀 [GPU_FFT] Starting GPU FFT operation:");
-    println!("   📊 Data size: {} elements", data_size);
-    println!("   ⚙️  Log_n: {}", log_n);
-    println!("   🔄 Inverse: {}", inverse);
-    
+    println!("icicle_fft");
     icicle::fft_on_device::<Scalar, G>(a, omega, log_n, inverse);
-    
-    let elapsed = start_time.elapsed();
-    println!("✅ [GPU_FFT] GPU FFT completed in {:.2?}", elapsed);
-    println!("   ⚡ Average: {:.2} elements/ms", data_size as f64 / elapsed.as_millis().max(1) as f64);
 }
 
 /// Convert coefficient bases group elements to lagrange basis by inverse FFT.
 pub fn g_to_lagrange<C: PrimeCurveAffine>(g_projective: Vec<C::Curve>, k: u32) -> Vec<C> {
-    let start_time = std::time::Instant::now();
-    let data_size = g_projective.len();
-    
-    println!("🖥️  [G_TO_LAGRANGE] Starting g_to_lagrange operation:");
-    println!("   📊 Data size: {} elements", data_size);
-    println!("   ⚙️  K: {}", k);
-    println!("   🧵 Using CPU processing (curve points)");
-    
-    // Step 1: Setup phase
-    let setup_start = std::time::Instant::now();
     let n_inv = C::Scalar::TWO_INV.pow_vartime([k as u64, 0, 0, 0]);
     let omega = C::Scalar::ROOT_OF_UNITY;
     let mut omega_inv = C::Scalar::ROOT_OF_UNITY_INV;
     for _ in k..C::Scalar::S {
         omega_inv = omega_inv.square();
     }
-    let setup_elapsed = setup_start.elapsed();
-    println!("   ✅ Step 1 - Setup: {:.2?}", setup_elapsed);
-    
-    // Step 2: FFT computation
-    let fft_start = std::time::Instant::now();
+
     let mut g_lagrange_projective = g_projective;
     let n = g_lagrange_projective.len();
     let fft_data = FFTData::new(n, omega, omega_inv);
+
     best_fft_cpu(&mut g_lagrange_projective, omega_inv, k, &fft_data, true);
-    let fft_elapsed = fft_start.elapsed();
-    println!("   ✅ Step 2 - FFT computation: {:.2?} ({:.2} elements/ms)", 
-             fft_elapsed, data_size as f64 / fft_elapsed.as_millis().max(1) as f64);
-    
-    // Step 3: Scalar multiplication
-    let scalar_start = std::time::Instant::now();
     parallelize(&mut g_lagrange_projective, |g, _| {
         for g in g.iter_mut() {
             *g *= n_inv;
         }
     });
-    let scalar_elapsed = scalar_start.elapsed();
-    println!("   ✅ Step 3 - Scalar multiplication: {:.2?} ({:.2} elements/ms)", 
-             scalar_elapsed, data_size as f64 / scalar_elapsed.as_millis().max(1) as f64);
-    
-    // Step 4: Batch normalization
-    let norm_start = std::time::Instant::now();
+
     let mut g_lagrange = vec![C::identity(); 1 << k];
     parallelize(&mut g_lagrange, |g_lagrange, starts| {
         C::Curve::batch_normalize(
@@ -294,24 +155,7 @@ pub fn g_to_lagrange<C: PrimeCurveAffine>(g_projective: Vec<C::Curve>, k: u32) -
             g_lagrange,
         );
     });
-    let norm_elapsed = norm_start.elapsed();
-    println!("   ✅ Step 4 - Batch normalization: {:.2?} ({:.2} elements/ms)", 
-             norm_elapsed, data_size as f64 / norm_elapsed.as_millis().max(1) as f64);
-    
-    let total_elapsed = start_time.elapsed();
-    println!("✅ [G_TO_LAGRANGE] g_to_lagrange completed in {:.2?}", total_elapsed);
-    println!("   ⚡ Total throughput: {:.2} elements/ms", 
-             data_size as f64 / total_elapsed.as_millis().max(1) as f64);
-    println!("   📊 Breakdown:");
-    println!("      - Setup: {:.1}%", 
-             setup_elapsed.as_millis() as f64 / total_elapsed.as_millis() as f64 * 100.0);
-    println!("      - FFT computation: {:.1}%", 
-             fft_elapsed.as_millis() as f64 / total_elapsed.as_millis() as f64 * 100.0);
-    println!("      - Scalar multiplication: {:.1}%", 
-             scalar_elapsed.as_millis() as f64 / total_elapsed.as_millis() as f64 * 100.0);
-    println!("      - Batch normalization: {:.1}%", 
-             norm_elapsed.as_millis() as f64 / total_elapsed.as_millis() as f64 * 100.0);
-    
+
     g_lagrange
 }
 /// This evaluates a provided polynomial (in coefficient form) at `point`.
@@ -562,487 +406,5 @@ fn test_lagrange_interpolate() {
         for (point, eval) in points.iter().zip(evals) {
             assert_eq!(eval_polynomial(&poly, *point), *eval);
         }
-    }
-}
-
-/// Batched FFT operations for better GPU utilization
-#[cfg(feature = "icicle_gpu")]
-pub fn batched_fft_operations<Scalar: Field + ff::PrimeField, G: FftGroup<Scalar> + ff::PrimeField>(
-    operations: &mut [(&mut [G], Scalar, u32, bool)],
-) {
-    if operations.is_empty() {
-        return;
-    }
-    
-    let start_time = std::time::Instant::now();
-    let total_elements: usize = operations.iter().map(|(data, _, _, _)| data.len()).sum();
-    
-    println!("🚀 [BATCHED_FFT] Starting batched FFT operations:");
-    println!("   📊 Total operations: {}", operations.len());
-    println!("   📊 Total elements: {}", total_elements);
-    
-    #[cfg(feature = "icicle_gpu")]
-    {
-        let enable_gpu = env::var("ENABLE_ICICLE_GPU").is_ok();
-        let gpu_supported = operations.iter().any(|(data, omega, _, _)| {
-            data.len() > 0 && icicle::is_gpu_supported_field(omega)
-        });
-        
-        if enable_gpu && gpu_supported {
-            println!("   🚀 Using GPU batched FFT");
-            
-            // Process operations in parallel batches for better GPU utilization
-            let batch_size = std::env::var("HALO2_FFT_BATCH_SIZE")
-                .unwrap_or_else(|_| "4".to_string())
-                .parse::<usize>()
-                .unwrap_or(4);
-            
-            for (batch_idx, batch) in operations.chunks_mut(batch_size).enumerate() {
-                let batch_start = std::time::Instant::now();
-                
-                // Process each operation in the batch
-                for (data, omega, log_n, inverse) in batch.iter_mut() {
-                    best_fft_gpu(*data, *omega, *log_n, *inverse);
-                }
-                
-                let batch_elapsed = batch_start.elapsed();
-                println!("   📦 GPU FFT batch {}: {} operations in {:.2?}", batch_idx, batch.len(), batch_elapsed);
-            }
-            
-            let elapsed = start_time.elapsed();
-            println!("✅ [BATCHED_FFT] GPU batched FFT completed in {:.2?}", elapsed);
-            println!("   ⚡ Average: {:.2} operations/ms", operations.len() as f64 / elapsed.as_millis().max(1) as f64);
-            return;
-        }
-    }
-    
-    // Fallback to CPU batched processing
-    println!("   💻 Using CPU batched FFT");
-    
-    // Process operations in parallel batches for better CPU utilization
-    let batch_size = std::env::var("HALO2_FFT_BATCH_SIZE")
-        .unwrap_or_else(|_| "4".to_string())
-        .parse::<usize>()
-        .unwrap_or(4);
-    
-    for (batch_idx, batch) in operations.chunks_mut(batch_size).enumerate() {
-        let batch_start = std::time::Instant::now();
-        
-        // Process each operation in the batch
-        for (data, omega, log_n, inverse) in batch.iter_mut() {
-            let fft_data = FFTData::new(data.len(), *omega, omega.invert().unwrap());
-            best_fft_cpu(*data, *omega, *log_n, &fft_data, *inverse);
-        }
-        
-        let batch_elapsed = batch_start.elapsed();
-        println!("   📦 CPU FFT batch {}: {} operations in {:.2?}", batch_idx, batch.len(), batch_elapsed);
-    }
-    
-    let elapsed = start_time.elapsed();
-    println!("✅ [BATCHED_FFT] CPU batched FFT completed in {:.2?}", elapsed);
-    println!("   ⚡ Average: {:.2} operations/ms", operations.len() as f64 / elapsed.as_millis().max(1) as f64);
-}
-
-/// Batched MSM operations for better GPU utilization
-#[cfg(feature = "icicle_gpu")]
-pub fn batched_msm_operations<C: CurveAffine>(
-    operations: &[(&[C::Scalar], &[C])],
-) -> Vec<C::Curve> {
-    if operations.is_empty() {
-        return Vec::new();
-    }
-    
-    let start_time = std::time::Instant::now();
-    let total_elements: usize = operations.iter().map(|(coeffs, _)| coeffs.len()).sum();
-    
-    println!("🚀 [BATCHED_MSM] Starting batched MSM operations:");
-    println!("   📊 Total operations: {}", operations.len());
-    println!("   📊 Total elements: {}", total_elements);
-    
-    #[cfg(feature = "icicle_gpu")]
-    {
-        let enable_gpu = env::var("ENABLE_ICICLE_GPU").is_ok();
-        let enable_batching = env::var("HALO2_MSM_BATCHING")
-            .unwrap_or_else(|_| "1".to_string())
-            .parse::<bool>()
-            .unwrap_or(true);
-        let gpu_supported = operations.iter().any(|(coeffs, _)| {
-            coeffs.len() > 0 && icicle::is_gpu_supported_field(&coeffs[0])
-        });
-        
-        println!("🔍 [BATCHED_MSM] GPU dispatch decision:");
-        println!("   ⚙️  ENABLE_ICICLE_GPU: {}", enable_gpu);
-        println!("   ⚙️  HALO2_MSM_BATCHING: {}", enable_batching);
-        println!("   🔧 GPU supported field: {}", gpu_supported);
-        
-        if enable_gpu && enable_batching && gpu_supported {
-            println!("   🚀 Using GPU batched MSM");
-            let results = icicle::batched_multiexp_on_device::<C>(operations);
-            
-            let elapsed = start_time.elapsed();
-            println!("✅ [BATCHED_MSM] GPU batched MSM completed in {:.2?}", elapsed);
-            println!("   ⚡ Average: {:.2} operations/ms", operations.len() as f64 / elapsed.as_millis().max(1) as f64);
-            
-            return results;
-        }
-    }
-    
-    // Fallback to CPU batched processing
-    println!("   💻 Using CPU batched MSM");
-    
-    // Process operations in parallel batches for better CPU utilization
-    let batch_size = std::env::var("HALO2_MSM_BATCH_SIZE")
-        .unwrap_or_else(|_| "4".to_string())
-        .parse::<usize>()
-        .unwrap_or(4);
-    
-    let mut results = Vec::with_capacity(operations.len());
-    
-    for (batch_idx, batch) in operations.chunks(batch_size).enumerate() {
-        let batch_start = std::time::Instant::now();
-        
-        // Process each operation in the batch
-        for (coeffs, bases) in batch {
-            let result = best_multiexp_cpu(coeffs, bases);
-            results.push(result);
-        }
-        
-        let batch_elapsed = batch_start.elapsed();
-        println!("   📦 MSM batch {}: {} operations in {:.2?}", batch_idx, batch.len(), batch_elapsed);
-    }
-    
-    let elapsed = start_time.elapsed();
-    println!("✅ [BATCHED_MSM] CPU batched MSM completed in {:.2?}", elapsed);
-    println!("   ⚡ Average: {:.2} operations/ms", operations.len() as f64 / elapsed.as_millis().max(1) as f64);
-    
-    results
-}
-
-/// Optimized FFT dispatch with better batching logic
-pub fn optimized_fft<Scalar: Field + ff::PrimeField, G: FftGroup<Scalar> + ff::PrimeField>(
-    scalars: &mut [G],
-    omega: Scalar,
-    log_n: u32,
-    data: &FFTData<Scalar>,
-    inverse: bool,
-) {
-    #[cfg(feature = "icicle_gpu")]
-    {
-        let enable_gpu = env::var("ENABLE_ICICLE_GPU").is_ok();
-        let should_use_cpu = icicle::should_use_cpu_fft(scalars.len());
-        let gpu_supported = icicle::is_gpu_supported_field(&omega);
-        
-        // Optimized threshold: use GPU for larger operations
-        let optimized_threshold = env::var("HALO2_FFT_GPU_THRESHOLD")
-            .unwrap_or_else(|_| "1024".to_string())
-            .parse::<usize>()
-            .unwrap_or(1024);
-        
-        let should_use_gpu = scalars.len() >= optimized_threshold;
-        
-        println!("🔍 [OPTIMIZED_FFT] FFT dispatch decision:");
-        println!("   📊 Data size: {} elements", scalars.len());
-        println!("   ⚙️  ENABLE_ICICLE_GPU: {}", enable_gpu);
-        println!("   🧵 Should use CPU (original): {}", should_use_cpu);
-        println!("   🚀 Should use GPU (optimized): {}", should_use_gpu);
-        println!("   🔧 GPU supported field: {}", gpu_supported);
-        
-        if enable_gpu && should_use_gpu && gpu_supported {
-            println!("   🚀 Using GPU FFT (optimized)");
-            best_fft_gpu(scalars, omega, log_n, inverse);
-        } else {
-            println!("   💻 Using CPU FFT");
-            best_fft_cpu(scalars, omega, log_n, data, inverse);
-        }
-    }
-
-    #[cfg(not(feature = "icicle_gpu"))]
-    best_fft_cpu(scalars, omega, log_n, data, inverse);
-}
-
-/// Optimized MSM dispatch with better batching logic
-pub fn optimized_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
-    #[cfg(feature = "icicle_gpu")]
-    {
-        let enable_gpu = env::var("ENABLE_ICICLE_GPU").is_ok();
-        let should_use_cpu = icicle::should_use_cpu_msm(coeffs.len());
-        let gpu_supported = icicle::is_gpu_supported_field(&coeffs[0]);
-        
-        // Optimized threshold: use GPU for larger operations
-        let optimized_threshold = env::var("HALO2_MSM_GPU_THRESHOLD")
-            .unwrap_or_else(|_| "512".to_string())
-            .parse::<usize>()
-            .unwrap_or(512);
-        
-        let should_use_gpu = coeffs.len() >= optimized_threshold;
-        
-        println!("🔍 [OPTIMIZED_MSM] MSM dispatch decision:");
-        println!("   📊 Data size: {} elements", coeffs.len());
-        println!("   ⚙️  ENABLE_ICICLE_GPU: {}", enable_gpu);
-        println!("   🧵 Should use CPU (original): {}", should_use_cpu);
-        println!("   🚀 Should use GPU (optimized): {}", should_use_gpu);
-        println!("   🔧 GPU supported field: {}", gpu_supported);
-        
-        if enable_gpu && should_use_gpu && gpu_supported {
-            println!("   🚀 Using GPU MSM (optimized)");
-            return best_multiexp_gpu(coeffs, bases);
-        } else {
-            println!("   💻 Using CPU MSM");
-        }
-    }
-
-    #[cfg(feature = "metal")]
-    {
-        use mopro_msm::metal::abstraction::limbs_conversion::h2c::{H2Fr, H2GAffine, H2G};
-        use std::sync::Once;
-
-        // Static mutex to block concurrent Metal acceleration calls
-        static PRINT_ONCE: Once = Once::new();
-
-        // Print the warning message only once
-        PRINT_ONCE.call_once(|| {
-            log::warn!(
-                "WARNING: Using Experimental Metal Acceleration for MSM. \
-                 Best performance improvements are observed with log row size >= 20. \
-                 Current log size: {}",
-                coeffs.len().ilog2()
-            );
-        });
-
-        // Perform MSM using Metal acceleration
-        return mopro_msm::metal::msm_best::<C, H2GAffine, H2G, H2Fr>(coeffs, bases);
-    }
-
-    #[allow(unreachable_code)]
-    best_multiexp_cpu(coeffs, bases)
-}
-
-// Global MSM batching system
-thread_local! {
-    static PENDING_MSM_OPERATIONS: std::cell::RefCell<Vec<MSMOperation>> = std::cell::RefCell::new(Vec::new());
-    static MSM_RESULTS: std::cell::RefCell<HashMap<usize, MSMResult>> = std::cell::RefCell::new(HashMap::new());
-    static MSM_BATCH_ID: std::cell::RefCell<usize> = std::cell::RefCell::new(0);
-}
-
-lazy_static! {
-    static ref GLOBAL_MSM_BATCH_COUNTER: AtomicUsize = AtomicUsize::new(0);
-}
-
-#[derive(Debug, Clone)]
-struct MSMOperation {
-    id: usize,
-    coeffs: Vec<u8>, // Serialized coefficients
-    bases: Vec<u8>,  // Serialized bases
-    curve_type: std::any::TypeId,
-    size: usize,
-}
-
-#[derive(Debug, Clone)]
-enum MSMResult {
-    Pending,
-    Completed(Vec<u8>), // Serialized result
-}
-
-impl MSMOperation {
-    fn new<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> Self {
-        // Serialize the data for storage
-        let coeffs_bytes = unsafe {
-            std::slice::from_raw_parts(
-                coeffs.as_ptr() as *const u8,
-                coeffs.len() * std::mem::size_of::<C::Scalar>(),
-            )
-        }.to_vec();
-        
-        let bases_bytes = unsafe {
-            std::slice::from_raw_parts(
-                bases.as_ptr() as *const u8,
-                bases.len() * std::mem::size_of::<C>(),
-            )
-        }.to_vec();
-        
-        Self {
-            id: GLOBAL_MSM_BATCH_COUNTER.fetch_add(1, Ordering::Relaxed),
-            coeffs: coeffs_bytes,
-            bases: bases_bytes,
-            curve_type: std::any::TypeId::of::<C>(),
-            size: coeffs.len(),
-        }
-    }
-}
-
-/// Global MSM batching context
-pub struct GlobalMSMBatcher;
-
-impl GlobalMSMBatcher {
-    /// Add an MSM operation to the pending batch
-    pub fn add_operation<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> usize {
-        let operation = MSMOperation::new(coeffs, bases);
-        let id = operation.id;
-        
-        PENDING_MSM_OPERATIONS.with(|pending| {
-            pending.borrow_mut().push(operation);
-        });
-        
-        // Initialize result as pending
-        MSM_RESULTS.with(|results| {
-            results.borrow_mut().insert(id, MSMResult::Pending);
-        });
-        
-        id
-    }
-    
-    /// Get result for a specific operation ID
-    pub fn get_result<C: CurveAffine>(operation_id: usize) -> Option<C::Curve> {
-        MSM_RESULTS.with(|results| {
-            let mut results_map = results.borrow_mut();
-            if let Some(result) = results_map.get(&operation_id) {
-                match result {
-                    MSMResult::Completed(bytes) => {
-                        // Deserialize the result
-                        let curve: C::Curve = unsafe {
-                            std::ptr::read(bytes.as_ptr() as *const C::Curve)
-                        };
-                        Some(curve)
-                    }
-                    MSMResult::Pending => None,
-                }
-            } else {
-                None
-            }
-        })
-    }
-    
-    /// Flush all pending MSM operations and store results
-    pub fn flush_operations<C: CurveAffine>() -> Vec<usize> {
-        let operations = PENDING_MSM_OPERATIONS.with(|pending| {
-            let mut ops = pending.borrow_mut();
-            // Use stable alternative to drain_filter
-            let mut filtered_ops = Vec::new();
-            let mut i = 0;
-            while i < ops.len() {
-                if std::any::TypeId::of::<C>() == ops[i].curve_type {
-                    filtered_ops.push(ops.remove(i));
-                } else {
-                    i += 1;
-                }
-            }
-            filtered_ops
-        });
-        
-        if operations.is_empty() {
-            return Vec::new();
-        }
-        
-        // Convert back to the proper format for batched processing
-        let mut batched_ops = Vec::new();
-        let mut operation_ids = Vec::new();
-        
-        for op in operations {
-            let coeffs: &[C::Scalar] = unsafe {
-                std::slice::from_raw_parts(
-                    op.coeffs.as_ptr() as *const C::Scalar,
-                    op.coeffs.len() / std::mem::size_of::<C::Scalar>(),
-                )
-            };
-            
-            let bases: &[C] = unsafe {
-                std::slice::from_raw_parts(
-                    op.bases.as_ptr() as *const C,
-                    op.bases.len() / std::mem::size_of::<C>(),
-                )
-            };
-            
-            batched_ops.push((coeffs, bases));
-            operation_ids.push(op.id);
-        }
-        
-        // Use the existing batched MSM function
-        let results = batched_msm_operations(&batched_ops);
-        
-        // Store results in the results map
-        MSM_RESULTS.with(|results_map| {
-            let mut map = results_map.borrow_mut();
-            for (id, result) in operation_ids.iter().zip(results.iter()) {
-                let result_bytes = unsafe {
-                    std::slice::from_raw_parts(
-                        result as *const C::Curve as *const u8,
-                        std::mem::size_of::<C::Curve>(),
-                    )
-                }.to_vec();
-                map.insert(*id, MSMResult::Completed(result_bytes));
-            }
-        });
-        
-        operation_ids
-    }
-    
-    /// Check if batching is enabled
-    pub fn is_batching_enabled() -> bool {
-        env::var("HALO2_GLOBAL_MSM_BATCHING")
-            .unwrap_or_else(|_| "1".to_string())
-            .parse::<bool>()
-            .unwrap_or(true)
-    }
-    
-    /// Get the current batch size threshold
-    pub fn get_batch_threshold() -> usize {
-        env::var("HALO2_GLOBAL_MSM_BATCH_SIZE")
-            .unwrap_or_else(|_| "4".to_string())
-            .parse::<usize>()
-            .unwrap_or(4)
-    }
-    
-    /// Get the number of pending operations
-    pub fn pending_count() -> usize {
-        PENDING_MSM_OPERATIONS.with(|pending| pending.borrow().len())
-    }
-    
-    /// Force flush all remaining operations (call at end of proof generation)
-    pub fn force_flush_all<C: CurveAffine>() {
-        let pending_count = Self::pending_count();
-        if pending_count > 0 {
-            println!("🔄 [GLOBAL_MSM_BATCH] Force flushing {} remaining operations", pending_count);
-            Self::flush_operations::<C>();
-        }
-    }
-    
-    /// Clear all pending operations and results (for cleanup)
-    pub fn clear_all() {
-        PENDING_MSM_OPERATIONS.with(|pending| {
-            pending.borrow_mut().clear();
-        });
-        MSM_RESULTS.with(|results| {
-            results.borrow_mut().clear();
-        });
-        println!("🧹 [GLOBAL_MSM_BATCH] Cleared all pending operations and results");
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use halo2curves::bn256::G1Affine;
-
-    #[test]
-    fn test_global_msm_batching() {
-        // Test that the global MSM batching system compiles and works
-        let coeffs = vec![ff::Field::ONE; 4];
-        let bases = vec![G1Affine::generator(); 4];
-        
-        // Test adding an operation
-        let operation_id = GlobalMSMBatcher::add_operation(&coeffs, &bases);
-        assert_eq!(operation_id, 0);
-        
-        // Test pending count
-        assert_eq!(GlobalMSMBatcher::pending_count(), 1);
-        
-        // Test batching enabled
-        assert!(GlobalMSMBatcher::is_batching_enabled());
-        
-        // Test batch threshold
-        assert_eq!(GlobalMSMBatcher::get_batch_threshold(), 4);
-        
-        // Clear for cleanup
-        GlobalMSMBatcher::clear_all();
     }
 }
