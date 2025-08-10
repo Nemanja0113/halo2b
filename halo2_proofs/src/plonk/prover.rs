@@ -467,7 +467,7 @@ where
                     assert!(existing.is_none());
                 }
             }
-            log::debug!("  Phase {} completed: {:?}", current_phase, phase_sub_start.elapsed());
+            log::debug!("  Phase {:?} completed: {:?}", current_phase, phase_sub_start.elapsed());
         }
 
         assert_eq!(challenges.len(), meta.num_challenges);
