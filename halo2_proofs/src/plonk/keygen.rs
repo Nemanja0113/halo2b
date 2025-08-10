@@ -18,7 +18,7 @@ use crate::{
     circuit::Value,
     poly::{
         batch_invert_assigned,
-        commitment::{Blind, Params},
+        commitment::{Blind, Params, ParamsProver},
         EvaluationDomain,
     },
 };
@@ -215,7 +215,7 @@ pub fn keygen_vk<'params, C, P, ConcreteCircuit>(
 ) -> Result<VerifyingKey<C>, Error>
 where
     C: CurveAffine,
-    P: Params<'params, C>,
+    P: Params<'params, C> + ParamsProver<'params, C>,
     ConcreteCircuit: Circuit<C::Scalar>,
     C::Scalar: FromUniformBytes<64>,
 {
@@ -232,7 +232,7 @@ pub fn keygen_vk_custom<'params, C, P, ConcreteCircuit>(
 ) -> Result<VerifyingKey<C>, Error>
 where
     C: CurveAffine,
-    P: Params<'params, C>,
+    P: Params<'params, C> + ParamsProver<'params, C>,
     ConcreteCircuit: Circuit<C::Scalar>,
     C::Scalar: FromUniformBytes<64>,
 {
@@ -291,7 +291,7 @@ where
         // Convert to coefficient form for batched commitment
         let fixed_coeffs: Vec<_> = fixed
             .iter()
-            .map(|poly| vk.domain.lagrange_to_coeff(poly.clone()))
+            .map(|poly| domain.lagrange_to_coeff(poly.clone()))
             .collect();
         
         // Use batched commitment
@@ -330,7 +330,7 @@ pub fn keygen_pk<'params, C, P, ConcreteCircuit>(
 ) -> Result<ProvingKey<C>, Error>
 where
     C: CurveAffine,
-    P: Params<'params, C>,
+    P: Params<'params, C> + ParamsProver<'params, C>,
     ConcreteCircuit: Circuit<C::Scalar>,
 {
     let mut cs = ConstraintSystem::default();
