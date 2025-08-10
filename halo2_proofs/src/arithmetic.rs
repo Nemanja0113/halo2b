@@ -1,6 +1,13 @@
 //! This module provides common utilities, traits and structures for group,
 //! field and polynomial arithmetic.
 
+use std::collections::HashMap;
+use std::env;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::thread_local;
+use std::any::TypeId;
+
 #[cfg(feature = "icicle_gpu")]
 use super::icicle;
 #[cfg(feature = "icicle_gpu")]
@@ -33,6 +40,41 @@ where
 
 /// Best MSM
 pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
+    // Check if global MSM batching is enabled
+    if GlobalMSMBatcher::is_batching_enabled() {
+        let batch_threshold = GlobalMSMBatcher::get_batch_threshold();
+        let pending_count = GlobalMSMBatcher::pending_count();
+        
+        // Add current operation to the batch
+        let operation_id = GlobalMSMBatcher::add_operation(coeffs, bases);
+        
+        // If we have enough pending operations, flush the batch
+        if pending_count + 1 >= batch_threshold {
+            println!("🔄 [GLOBAL_MSM_BATCH] Flushing batch with {} operations", pending_count + 1);
+            let completed_ids = GlobalMSMBatcher::flush_operations::<C>();
+            
+            // Try to get our result
+            if let Some(result) = GlobalMSMBatcher::get_result::<C>(operation_id) {
+                println!("   ✅ Retrieved batched result for operation {}", operation_id);
+                return result;
+            } else {
+                println!("   ⚠️  Result not found, falling back to immediate execution");
+            }
+        } else {
+            println!("📦 [GLOBAL_MSM_BATCH] Added operation {} to pending batch ({} total)", 
+                    operation_id, pending_count + 1);
+            
+            // Check if we can get a result from a previous batch
+            if let Some(result) = GlobalMSMBatcher::get_result::<C>(operation_id) {
+                println!("   ✅ Retrieved cached result for operation {}", operation_id);
+                return result;
+            }
+            
+            // For now, execute immediately since we don't have async result handling
+            println!("   ⚠️  Immediate execution (async result handling not implemented)");
+        }
+    }
+    
     #[cfg(feature = "icicle_gpu")]
     {
         let enable_gpu = env::var("ENABLE_ICICLE_GPU").is_ok();
@@ -112,15 +154,9 @@ pub fn best_multiexp_cpu<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C
 pub fn best_multiexp_gpu<C: CurveAffine>(coeffs: &[C::Scalar], g: &[C]) -> C::Curve {
     let start_time = std::time::Instant::now();
     let data_size = coeffs.len();
-    println!("🚀 [GPU_MSM] Starting GPU MSM operation:");
-    println!("   📊 Data size: {} elements", data_size);
-    println!("   🧵 Using GPU acceleration");
-    
     let result = icicle::multiexp_on_device::<C>(coeffs, g);
     
     let elapsed = start_time.elapsed();
-    println!("✅ [GPU_MSM] GPU MSM completed in {:.2?}", elapsed);
-    println!("   ⚡ Average: {:.2} elements/ms", data_size as f64 / elapsed.as_millis().max(1) as f64);
     
     result
 }
@@ -780,4 +816,239 @@ pub fn optimized_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> 
 
     #[allow(unreachable_code)]
     best_multiexp_cpu(coeffs, bases)
+}
+
+// Global MSM batching system
+thread_local! {
+    static PENDING_MSM_OPERATIONS: std::cell::RefCell<Vec<MSMOperation>> = std::cell::RefCell::new(Vec::new());
+    static MSM_RESULTS: std::cell::RefCell<HashMap<usize, MSMResult>> = std::cell::RefCell::new(HashMap::new());
+    static MSM_BATCH_ID: std::cell::RefCell<usize> = std::cell::RefCell::new(0);
+}
+
+static GLOBAL_MSM_BATCH_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Debug, Clone)]
+struct MSMOperation {
+    id: usize,
+    coeffs: Vec<u8>, // Serialized coefficients
+    bases: Vec<u8>,  // Serialized bases
+    curve_type: std::any::TypeId,
+    size: usize,
+}
+
+#[derive(Debug, Clone)]
+enum MSMResult {
+    Pending,
+    Completed(Vec<u8>), // Serialized result
+}
+
+impl MSMOperation {
+    fn new<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> Self {
+        // Serialize the data for storage
+        let coeffs_bytes = unsafe {
+            std::slice::from_raw_parts(
+                coeffs.as_ptr() as *const u8,
+                coeffs.len() * std::mem::size_of::<C::Scalar>(),
+            )
+        }.to_vec();
+        
+        let bases_bytes = unsafe {
+            std::slice::from_raw_parts(
+                bases.as_ptr() as *const u8,
+                bases.len() * std::mem::size_of::<C>(),
+            )
+        }.to_vec();
+        
+        Self {
+            id: GLOBAL_MSM_BATCH_COUNTER.fetch_add(1, Ordering::Relaxed),
+            coeffs: coeffs_bytes,
+            bases: bases_bytes,
+            curve_type: std::any::TypeId::of::<C>(),
+            size: coeffs.len(),
+        }
+    }
+}
+
+/// Global MSM batching context
+pub struct GlobalMSMBatcher;
+
+impl GlobalMSMBatcher {
+    /// Add an MSM operation to the pending batch
+    pub fn add_operation<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> usize {
+        let operation = MSMOperation::new(coeffs, bases);
+        let id = operation.id;
+        
+        PENDING_MSM_OPERATIONS.with(|pending| {
+            pending.borrow_mut().push(operation);
+        });
+        
+        // Initialize result as pending
+        MSM_RESULTS.with(|results| {
+            results.borrow_mut().insert(id, MSMResult::Pending);
+        });
+        
+        id
+    }
+    
+    /// Get result for a specific operation ID
+    pub fn get_result<C: CurveAffine>(operation_id: usize) -> Option<C::Curve> {
+        MSM_RESULTS.with(|results| {
+            let mut results_map = results.borrow_mut();
+            if let Some(result) = results_map.get(&operation_id) {
+                match result {
+                    MSMResult::Completed(bytes) => {
+                        // Deserialize the result
+                        let curve: C::Curve = unsafe {
+                            std::ptr::read(bytes.as_ptr() as *const C::Curve)
+                        };
+                        Some(curve)
+                    }
+                    MSMResult::Pending => None,
+                }
+            } else {
+                None
+            }
+        })
+    }
+    
+    /// Flush all pending MSM operations and store results
+    pub fn flush_operations<C: CurveAffine>() -> Vec<usize> {
+        let operations = PENDING_MSM_OPERATIONS.with(|pending| {
+            let mut ops = pending.borrow_mut();
+            let filtered_ops: Vec<_> = ops.drain_filter(|op| {
+                op.curve_type == std::any::TypeId::of::<C>()
+            }).collect();
+            filtered_ops
+        });
+        
+        if operations.is_empty() {
+            return Vec::new();
+        }
+        
+        // Convert back to the proper format for batched processing
+        let mut batched_ops = Vec::new();
+        let mut operation_ids = Vec::new();
+        
+        for op in operations {
+            let coeffs: &[C::Scalar] = unsafe {
+                std::slice::from_raw_parts(
+                    op.coeffs.as_ptr() as *const C::Scalar,
+                    op.coeffs.len() / std::mem::size_of::<C::Scalar>(),
+                )
+            };
+            
+            let bases: &[C] = unsafe {
+                std::slice::from_raw_parts(
+                    op.bases.as_ptr() as *const C,
+                    op.bases.len() / std::mem::size_of::<C>(),
+                )
+            };
+            
+            batched_ops.push((coeffs, bases));
+            operation_ids.push(op.id);
+        }
+        
+        // Use the existing batched MSM function
+        let results = batched_msm_operations(&batched_ops);
+        
+        // Store results in the results map
+        MSM_RESULTS.with(|results_map| {
+            let mut map = results_map.borrow_mut();
+            for (id, result) in operation_ids.iter().zip(results.iter()) {
+                let result_bytes = unsafe {
+                    std::slice::from_raw_parts(
+                        result as *const C::Curve as *const u8,
+                        std::mem::size_of::<C::Curve>(),
+                    )
+                }.to_vec();
+                map.insert(*id, MSMResult::Completed(result_bytes));
+            }
+        });
+        
+        operation_ids
+    }
+    
+    /// Check if batching is enabled
+    pub fn is_batching_enabled() -> bool {
+        env::var("HALO2_GLOBAL_MSM_BATCHING")
+            .unwrap_or_else(|_| "1".to_string())
+            .parse::<bool>()
+            .unwrap_or(true)
+    }
+    
+    /// Get the current batch size threshold
+    pub fn get_batch_threshold() -> usize {
+        env::var("HALO2_GLOBAL_MSM_BATCH_SIZE")
+            .unwrap_or_else(|_| "4".to_string())
+            .parse::<usize>()
+            .unwrap_or(4)
+    }
+    
+    /// Get the number of pending operations
+    pub fn pending_count() -> usize {
+        PENDING_MSM_OPERATIONS.with(|pending| pending.borrow().len())
+    }
+    
+    /// Force flush all remaining operations (call at end of proof generation)
+    pub fn force_flush_all<C: CurveAffine>() {
+        let pending_count = Self::pending_count();
+        if pending_count > 0 {
+            println!("🔄 [GLOBAL_MSM_BATCH] Force flushing {} remaining operations", pending_count);
+            Self::flush_operations::<C>();
+        }
+    }
+    
+    /// Clear all pending operations and results (for cleanup)
+    pub fn clear_all() {
+        PENDING_MSM_OPERATIONS.with(|pending| {
+            pending.borrow_mut().clear();
+        });
+        MSM_RESULTS.with(|results| {
+            results.borrow_mut().clear();
+        });
+        println!("🧹 [GLOBAL_MSM_BATCH] Cleared all pending operations and results");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use halo2curves::bn256::{Fr, G1Affine};
+    use halo2curves::CurveAffine;
+    
+    #[test]
+    fn test_global_msm_batching() {
+        // Set environment variables for testing
+        std::env::set_var("HALO2_GLOBAL_MSM_BATCHING", "1");
+        std::env::set_var("HALO2_GLOBAL_MSM_BATCH_SIZE", "2");
+        std::env::set_var("ENABLE_ICICLE_GPU", "false"); // Use CPU for testing
+        
+        // Clear any existing state
+        GlobalMSMBatcher::clear_all();
+        
+        // Create test data
+        let coeffs1 = vec![Fr::from(1u64), Fr::from(2u64)];
+        let bases1 = vec![G1Affine::generator(), G1Affine::generator()];
+        
+        let coeffs2 = vec![Fr::from(3u64), Fr::from(4u64)];
+        let bases2 = vec![G1Affine::generator(), G1Affine::generator()];
+        
+        // First operation should be added to pending batch
+        let result1 = best_multiexp::<G1Affine>(&coeffs1, &bases1);
+        
+        // Second operation should trigger batch flush
+        let result2 = best_multiexp::<G1Affine>(&coeffs2, &bases2);
+        
+        // Verify results are not zero
+        assert!(!result1.is_identity().into());
+        assert!(!result2.is_identity().into());
+        
+        // Force flush any remaining operations
+        GlobalMSMBatcher::force_flush_all::<G1Affine>();
+        
+        // Clear state
+        GlobalMSMBatcher::clear_all();
+        
+        println!("✅ Global MSM batching test passed");
+    }
 }
