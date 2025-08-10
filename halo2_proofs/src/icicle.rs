@@ -12,7 +12,6 @@ use icicle_core::{
 };
 use maybe_rayon::iter::IntoParallelRefIterator;
 use maybe_rayon::iter::ParallelIterator;
-use maybe_rayon::iter::IndexedParallelIterator;
 use std::{env, mem};
 
 pub fn should_use_cpu_msm(size: usize) -> bool {
@@ -96,41 +95,6 @@ pub fn multiexp_on_device<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> 
     let msm_point = c_from_icicle_point::<C>(&msm_host_result[0]);
 
     msm_point
-}
-
-/// Performs batched multi-exponentiation operations on GPU using Icicle library
-/// This function computes multiple MSM operations in parallel for better GPU utilization
-pub fn batched_multiexp_on_device<C: CurveAffine>(
-    coeffs_batches: &[&[C::Scalar]], 
-    bases_batches: &[&[C]]
-) -> Vec<C::Curve> {
-    use instant::Instant;
-    
-    let batch_count = coeffs_batches.len();
-    assert_eq!(batch_count, bases_batches.len(), "Number of coefficient and base batches must match");
-    
-    if batch_count == 0 {
-        return Vec::new();
-    }
-    
-    let msm_start = Instant::now();
-    log::debug!("🚀 [BATCHED_MSM_GPU] Starting batched GPU MSM: {} batches", batch_count);
-    
-    // For now, we'll use parallel individual MSM calls
-    // In the future, this could be optimized to use a single GPU kernel for all batches
-    let results: Vec<C::Curve> = coeffs_batches
-        .par_iter()
-        .enumerate()
-        .map(|(i, coeffs)| multiexp_on_device(coeffs, bases_batches[i]))
-        .collect();
-    
-    let elapsed = msm_start.elapsed();
-    let total_elements: usize = coeffs_batches.iter().map(|c| c.len()).sum();
-    
-    log::info!("⚡ [BATCHED_MSM_GPU] Batched GPU MSM completed: {} batches, {} total elements in {:?} ({:.2} elements/ms)", 
-               batch_count, total_elements, elapsed, total_elements as f64 / elapsed.as_millis() as f64);
-    
-    results
 }
 
 pub fn fft_on_device<Scalar: ff::PrimeField, G: FftGroup<Scalar> + ff::PrimeField>(

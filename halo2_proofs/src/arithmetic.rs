@@ -16,202 +16,6 @@ use group::{
 use halo2curves::msm::msm_best;
 pub use halo2curves::{CurveAffine, CurveExt};
 
-// Global MSM batching system
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Mutex;
-use std::time::Duration;
-use std::collections::HashMap;
-use std::any::{TypeId, Any};
-
-lazy_static::lazy_static! {
-    static ref MSM_COUNTER: AtomicUsize = AtomicUsize::new(0);
-    static ref MSM_TOTAL_TIME: Mutex<Duration> = Mutex::new(Duration::ZERO);
-    static ref MSM_GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
-    static ref MSM_CPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
-    static ref MSM_METAL_COUNTER: AtomicUsize = AtomicUsize::new(0);
-    static ref MSM_BATCHED_COUNTER: AtomicUsize = AtomicUsize::new(0);
-    
-    // FFT statistics tracking
-    static ref FFT_COUNTER: AtomicUsize = AtomicUsize::new(0);
-    static ref FFT_TOTAL_TIME: Mutex<Duration> = Mutex::new(Duration::ZERO);
-    static ref FFT_GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
-    static ref FFT_CPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
-}
-
-// Global MSM batching system
-thread_local! {
-    static GLOBAL_MSM_BATCHER: std::cell::RefCell<GlobalMSMBatcher> = std::cell::RefCell::new(GlobalMSMBatcher::new());
-}
-
-/// Represents a single MSM operation for batching
-#[derive(Debug, Clone)]
-struct MSMOperation<C: CurveAffine> {
-    id: usize,
-    coeffs: Vec<C::Scalar>,
-    bases: Vec<C>,
-    result: Option<C::Curve>,
-}
-
-/// Represents the result of an MSM operation
-#[derive(Debug, Clone)]
-struct MSMResult<C: CurveAffine> {
-    id: usize,
-    result: C::Curve,
-}
-
-/// Global MSM batcher that collects and processes MSM operations
-struct GlobalMSMBatcher {
-    operations: HashMap<TypeId, Vec<Box<dyn Any + Send + Sync>>>,
-    next_id: AtomicUsize,
-    batch_threshold: usize,
-    is_batching_enabled: bool,
-}
-
-impl GlobalMSMBatcher {
-    fn new() -> Self {
-        let batch_threshold = env::var("HALO2_MSM_BATCH_THRESHOLD")
-            .unwrap_or_else(|_| "10".to_string())
-            .parse()
-            .unwrap_or(10);
-        
-        let is_batching_enabled = env::var("HALO2_MSM_BATCHING").is_ok();
-        
-        Self {
-            operations: HashMap::new(),
-            next_id: AtomicUsize::new(0),
-            batch_threshold,
-            is_batching_enabled,
-        }
-    }
-    
-    fn add_operation<C: CurveAffine>(&mut self, coeffs: Vec<C::Scalar>, bases: Vec<C>) -> usize {
-        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let operation = MSMOperation {
-            id,
-            coeffs,
-            bases,
-            result: None,
-        };
-        
-        let type_id = TypeId::of::<C>();
-        self.operations
-            .entry(type_id)
-            .or_insert_with(Vec::new)
-            .push(Box::new(operation));
-        
-        id
-    }
-    
-    fn get_result<C: CurveAffine>(&mut self, id: usize) -> Option<C::Curve> {
-        let type_id = TypeId::of::<C>();
-        if let Some(operations) = self.operations.get_mut(&type_id) {
-            for operation in operations {
-                if let Some(op) = operation.downcast_mut::<MSMOperation<C>>() {
-                    if op.id == id {
-                        return op.result.take();
-                    }
-                }
-            }
-        }
-        None
-    }
-    
-    fn should_flush(&self) -> bool {
-        self.is_batching_enabled && self.pending_count() >= self.batch_threshold
-    }
-    
-    fn pending_count(&self) -> usize {
-        self.operations.values().map(|ops| ops.len()).sum()
-    }
-    
-    fn flush_operations<C: CurveAffine>(&mut self) -> Vec<MSMResult<C>> {
-        let type_id = TypeId::of::<C>();
-        let mut results = Vec::new();
-        
-        if let Some(operations) = self.operations.remove(&type_id) {
-            let mut coeffs_batches = Vec::new();
-            let mut bases_batches = Vec::new();
-            let mut operation_ids = Vec::new();
-            let mut operations_with_results = Vec::new();
-            
-            // Extract operations and prepare for batched processing
-            for operation in operations {
-                if let Ok(op) = operation.downcast::<MSMOperation<C>>() {
-                    let coeffs = op.coeffs.clone();
-                    let bases = op.bases.clone();
-                    let id = op.id;
-                    coeffs_batches.push(coeffs);
-                    bases_batches.push(bases);
-                    operation_ids.push(id);
-                    operations_with_results.push(op);
-                }
-            }
-            
-            if !coeffs_batches.is_empty() {
-                // Use batched MSM if GPU is available
-                #[cfg(feature = "icicle_gpu")]
-                let batched_results = if env::var("ENABLE_ICICLE_GPU").is_ok() {
-                    let coeffs_slices: Vec<&[C::Scalar]> = coeffs_batches.iter().map(|c| c.as_slice()).collect();
-                    let bases_slices: Vec<&[C]> = bases_batches.iter().map(|b| b.as_slice()).collect();
-                    icicle::batched_multiexp_on_device(&coeffs_slices, &bases_slices)
-                } else {
-                    // Fallback to individual CPU MSM
-                    coeffs_batches
-                        .iter()
-                        .zip(bases_batches.iter())
-                        .map(|(coeffs, bases)| msm_best(coeffs, bases))
-                        .collect()
-                };
-                
-                #[cfg(not(feature = "icicle_gpu"))]
-                let batched_results = coeffs_batches
-                    .iter()
-                    .zip(bases_batches.iter())
-                    .map(|(coeffs, bases)| msm_best(coeffs, bases))
-                    .collect::<Vec<_>>();
-                
-                // Store results back to operations and create result list
-                for (op, result) in operations_with_results.iter_mut().zip(batched_results) {
-                    op.result = Some(result.clone());
-                    results.push(MSMResult { id: op.id, result });
-                }
-                
-                // Re-insert operations with results
-                let operations_boxed: Vec<Box<dyn Any + Send + Sync>> = operations_with_results
-                    .into_iter()
-                    .map(|op| Box::new(op) as Box<dyn Any + Send + Sync>)
-                    .collect();
-                self.operations.insert(type_id, operations_boxed);
-                
-                // Update batched counter
-                MSM_BATCHED_COUNTER.fetch_add(1, Ordering::Relaxed);
-            }
-        }
-        
-        results
-    }
-    
-    fn force_flush_all(&mut self) {
-        // Flush all pending operations for all curve types
-        // This is a simplified implementation that clears all operations
-        // In a full implementation, we would iterate through all TypeIds and flush each one
-        self.operations.clear();
-    }
-    
-    fn clear_all(&mut self) {
-        self.operations.clear();
-        self.next_id.store(0, Ordering::Relaxed);
-    }
-    
-    fn is_batching_enabled(&self) -> bool {
-        self.is_batching_enabled
-    }
-    
-    fn get_batch_threshold(&self) -> usize {
-        self.batch_threshold
-    }
-}
-
 /// This represents an element of a group with basic operations that can be
 /// performed. This allows an FFT implementation (for example) to operate
 /// generically over either a field or elliptic curve group.
@@ -232,60 +36,6 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
     let data_size = coeffs.len();
     let log_size = data_size.ilog2();
     
-    // Check if global batching is enabled
-    let use_batching = GLOBAL_MSM_BATCHER.with(|batcher| {
-        let batcher = batcher.borrow();
-        batcher.is_batching_enabled() && 
-        env::var("ENABLE_ICICLE_GPU").is_ok() &&
-        !icicle::should_use_cpu_msm(coeffs.len()) &&
-        icicle::is_gpu_supported_field(&coeffs[0])
-    });
-    
-    if use_batching {
-        // Add operation to global batcher
-        let operation_id = GLOBAL_MSM_BATCHER.with(|batcher| {
-            let mut batcher = batcher.borrow_mut();
-            batcher.add_operation(coeffs.to_vec(), bases.to_vec())
-        });
-        
-        // Check if we should flush the batch
-        let should_flush = GLOBAL_MSM_BATCHER.with(|batcher| {
-            let batcher = batcher.borrow();
-            batcher.should_flush()
-        });
-        
-        if should_flush {
-            // Flush operations and get results
-            let results = GLOBAL_MSM_BATCHER.with(|batcher| {
-                let mut batcher = batcher.borrow_mut();
-                batcher.flush_operations::<C>()
-            });
-            
-            // Find our result
-            for result in results {
-                if result.id == operation_id {
-                    log::debug!("🔄 [MSM_BATCHED] Retrieved batched result for operation {}", operation_id);
-                    return result.result;
-                }
-            }
-        }
-        
-        // Wait for result to be available
-        loop {
-            if let Some(result) = GLOBAL_MSM_BATCHER.with(|batcher| {
-                let mut batcher = batcher.borrow_mut();
-                batcher.get_result::<C>(operation_id)
-            }) {
-                log::debug!("🔄 [MSM_BATCHED] Retrieved batched result for operation {}", operation_id);
-                return result;
-            }
-            
-            // Small delay to avoid busy waiting
-            std::thread::sleep(std::time::Duration::from_micros(1));
-        }
-    }
-    
-    // Fallback to normal dispatch
     #[cfg(feature = "icicle_gpu")]
     if env::var("ENABLE_ICICLE_GPU").is_ok()
         && !icicle::should_use_cpu_msm(coeffs.len())
@@ -729,14 +479,32 @@ use crate::fft::{self, recursive::FFTData};
 use crate::halo2curves::pasta::Fp;
 // use crate::plonk::{get_duration, get_time, start_measure, stop_measure};
 
-pub fn get_msm_stats() -> (usize, Duration, usize, usize, usize, usize) {
+// Global MSM tracking
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Mutex;
+use std::time::Duration;
+
+lazy_static::lazy_static! {
+    static ref MSM_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static ref MSM_TOTAL_TIME: Mutex<Duration> = Mutex::new(Duration::ZERO);
+    static ref MSM_GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static ref MSM_CPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static ref MSM_METAL_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    
+    // FFT statistics tracking
+    static ref FFT_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static ref FFT_TOTAL_TIME: Mutex<Duration> = Mutex::new(Duration::ZERO);
+    static ref FFT_GPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
+    static ref FFT_CPU_COUNTER: AtomicUsize = AtomicUsize::new(0);
+}
+
+pub fn get_msm_stats() -> (usize, Duration, usize, usize, usize) {
     let total_count = MSM_COUNTER.load(Ordering::Relaxed);
     let total_time = *MSM_TOTAL_TIME.lock().unwrap();
     let gpu_count = MSM_GPU_COUNTER.load(Ordering::Relaxed);
     let cpu_count = MSM_CPU_COUNTER.load(Ordering::Relaxed);
     let metal_count = MSM_METAL_COUNTER.load(Ordering::Relaxed);
-    let batched_count = MSM_BATCHED_COUNTER.load(Ordering::Relaxed);
-    (total_count, total_time, gpu_count, cpu_count, metal_count, batched_count)
+    (total_count, total_time, gpu_count, cpu_count, metal_count)
 }
 
 pub fn reset_msm_stats() {
@@ -745,43 +513,6 @@ pub fn reset_msm_stats() {
     MSM_GPU_COUNTER.store(0, Ordering::Relaxed);
     MSM_CPU_COUNTER.store(0, Ordering::Relaxed);
     MSM_METAL_COUNTER.store(0, Ordering::Relaxed);
-    MSM_BATCHED_COUNTER.store(0, Ordering::Relaxed);
-}
-
-// Global MSM batching utility functions
-pub fn is_global_msm_batching_enabled() -> bool {
-    GLOBAL_MSM_BATCHER.with(|batcher| {
-        let batcher = batcher.borrow();
-        batcher.is_batching_enabled()
-    })
-}
-
-pub fn get_global_msm_batch_threshold() -> usize {
-    GLOBAL_MSM_BATCHER.with(|batcher| {
-        let batcher = batcher.borrow();
-        batcher.get_batch_threshold()
-    })
-}
-
-pub fn get_global_msm_pending_count() -> usize {
-    GLOBAL_MSM_BATCHER.with(|batcher| {
-        let batcher = batcher.borrow();
-        batcher.pending_count()
-    })
-}
-
-pub fn force_flush_global_msm_batch() {
-    GLOBAL_MSM_BATCHER.with(|batcher| {
-        let mut batcher = batcher.borrow_mut();
-        batcher.force_flush_all();
-    });
-}
-
-pub fn clear_global_msm_batch() {
-    GLOBAL_MSM_BATCHER.with(|batcher| {
-        let mut batcher = batcher.borrow_mut();
-        batcher.clear_all();
-    });
 }
 
 pub fn get_fft_stats() -> (usize, Duration, usize, usize) {

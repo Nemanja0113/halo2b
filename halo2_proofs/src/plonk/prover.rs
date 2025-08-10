@@ -29,10 +29,6 @@ use super::mv_lookup as lookup;
 #[cfg(feature = "mv-lookup")]
 use maybe_rayon::iter::{IntoParallelIterator, IntoParallelRefIterator};
 
-// Add parallel iterator support for advice commitment optimization
-#[cfg(not(feature = "mv-lookup"))]
-use maybe_rayon::iter::{IntoParallelIterator, IntoParallelRefIterator};
-
 use crate::{
     arithmetic::{eval_polynomial, CurveAffine},
     circuit::Value,
@@ -423,7 +419,7 @@ where
                 log::debug!("    Blinding factors: {:?}", blinding_start.elapsed());
 
                 let commitment_start = Instant::now();
-                // Compute commitments to advice column polynomials using batched MSM
+                // Compute commitments to advice column polynomials
                 let blinds: Vec<_> = column_indices
                     .iter()
                     .map(|i| {
@@ -434,56 +430,25 @@ where
                         }
                     })
                     .collect();
-
-                // Check if we should use batched MSM optimization
-                let use_batched_msm = advice_values.len() > 1 && 
-                    std::env::var("HALO2_BATCHED_ADVICE_MSM").is_ok();
-                
-                let advice_commitments_projective: Vec<_> = if use_batched_msm {
-                    log::debug!("    Using batched MSM for {} advice polynomials", advice_values.len());
-                    
-                    // For now, we'll use parallel individual MSM calls as a first step
-                    // This still provides some benefit by running MSM operations in parallel
-                    #[cfg(feature = "icicle_gpu")]
-                    let results = if std::env::var("ENABLE_ICICLE_GPU").is_ok() {
-                        // Use parallel processing for individual MSM calls
-                        advice_values
-                            .par_iter()
-                            .zip(blinds.par_iter())
-                            .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                            .collect()
-                    } else {
-                        // Fallback to sequential individual MSM if GPU not enabled
-                        advice_values
-                            .iter()
-                            .zip(blinds.iter())
-                            .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                            .collect()
-                    };
-                    
-                    #[cfg(not(feature = "icicle_gpu"))]
-                    let results = advice_values
-                        .iter()
-                        .zip(blinds.iter())
-                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                        .collect();
-                    
-                    results
-                } else {
-                    // Original individual commitment approach
-                    advice_values
-                        .iter()
-                        .zip(blinds.iter())
-                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                        .collect()
-                };
-                let advice_commitments = advice_commitments_projective;
+                let advice_commitments_projective: Vec<_> = advice_values
+                    .iter()
+                    .zip(blinds.iter())
+                    .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                    .collect();
+                let mut advice_commitments =
+                    vec![Scheme::Curve::identity(); advice_commitments_projective.len()];
+                <Scheme::Curve as CurveAffine>::CurveExt::batch_normalize(
+                    &advice_commitments_projective,
+                    &mut advice_commitments,
+                );
+                let advice_commitments = advice_commitments;
+                drop(advice_commitments_projective);
 
                 log::debug!("    Advice commitments: {:?}", commitment_start.elapsed());
 
                 let transcript_start = Instant::now();
                 for commitment in &advice_commitments {
-                    transcript.write_point((*commitment).into())?;
+                    transcript.write_point(*commitment)?;
                 }
                 for ((column_index, advice_values), blind) in
                     column_indices.iter().zip(advice_values).zip(blinds)
@@ -946,33 +911,14 @@ where
     let total_start = phase1_start;
     log::info!("🚀 [TOTAL] Complete Proof Generation: {:?}", total_start.elapsed());
     
-    // Force flush any remaining global MSM operations
-    if crate::arithmetic::is_global_msm_batching_enabled() {
-        crate::arithmetic::force_flush_global_msm_batch();
-        log::debug!("🔄 [MSM_BATCHING] Forced flush of remaining global MSM operations");
-    }
-    
     // Print MSM statistics
-    let (total_msm_count, total_msm_time, gpu_count, cpu_count, metal_count, batched_count) = crate::arithmetic::get_msm_stats();
-    log::info!("📊 [MSM_STATS] Total MSM operations: {} (GPU: {}, CPU: {}, Metal: {}, Batched: {})", 
-               total_msm_count, gpu_count, cpu_count, metal_count, batched_count);
+    let (total_msm_count, total_msm_time, gpu_count, cpu_count, metal_count) = crate::arithmetic::get_msm_stats();
+    log::info!("📊 [MSM_STATS] Total MSM operations: {} (GPU: {}, CPU: {}, Metal: {})", 
+               total_msm_count, gpu_count, cpu_count, metal_count);
     log::info!("📊 [MSM_STATS] Total MSM time: {:?} ({:.2}% of total)", 
                total_msm_time, (total_msm_time.as_millis() as f64 / total_start.elapsed().as_millis() as f64) * 100.0);
     if total_msm_count > 0 {
         log::info!("📊 [MSM_STATS] Average MSM time: {:?}", total_msm_time / total_msm_count as u32);
-    }
-    
-    // Print global MSM batching information
-    if crate::arithmetic::is_global_msm_batching_enabled() {
-        let batch_threshold = crate::arithmetic::get_global_msm_batch_threshold();
-        let pending_count = crate::arithmetic::get_global_msm_pending_count();
-        log::info!("📊 [MSM_BATCHING] Global batching enabled - Threshold: {}, Pending: {}", 
-                   batch_threshold, pending_count);
-        
-        if batched_count > 0 {
-            log::info!("📊 [MSM_BATCHING] Batched operations: {} (efficiency: {:.2}%)", 
-                       batched_count, (batched_count as f64 / total_msm_count as f64) * 100.0);
-        }
     }
     
     // Print FFT statistics
