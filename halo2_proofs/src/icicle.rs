@@ -14,7 +14,6 @@ use icicle_core::{
 };
 use maybe_rayon::iter::IntoParallelRefIterator;
 use maybe_rayon::iter::ParallelIterator;
-use maybe_rayon::prelude::ParallelSlice;
 use std::{env, mem};
 
 // GPU MSM Performance Optimization Imports
