@@ -33,13 +33,22 @@ pub fn is_gpu_supported_field<G: Any>(_sample_element: &G) -> bool {
 }
 
 fn repr_from_u32<C: CurveAffine>(u32_arr: &[u32; 8]) -> <C as CurveAffine>::Base {
+    println!("      🔍 [REPR_CONVERSION] Converting u32 array: {:?}", u32_arr);
+    
     let t: &[<<C as CurveAffine>::Base as PrimeField>::Repr] =
         unsafe { mem::transmute(&u32_arr[..]) };
-    return PrimeField::from_repr(t[0]).unwrap();
+    println!("      🔍 [REPR_CONVERSION] Transmuted to repr: {:?}", t);
+    
+    let result = PrimeField::from_repr(t[0]).unwrap();
+    println!("      🔍 [REPR_CONVERSION] Converted to field: {:?}", result);
+    
+    return result;
 }
 
 fn icicle_scalars_from_c_scalars<G: PrimeField>(coeffs: &[G]) -> Vec<ScalarField> {
     let start_time = std::time::Instant::now();
+    
+    println!("      🔍 [SCALAR_CONVERSION] Starting conversion for {} elements", coeffs.len());
     
     // Optimization 0: Check if zero-copy conversion is possible
     let use_zero_copy = std::env::var("HALO2_ZERO_COPY_CONVERSION")
@@ -66,26 +75,51 @@ fn icicle_scalars_from_c_scalars<G: PrimeField>(coeffs: &[G]) -> Vec<ScalarField
         .parse::<usize>()
         .unwrap_or(8192);
     
+    println!("      🔍 [SCALAR_CONVERSION] Using chunk size: {}", chunk_size);
+    
     // Optimization 3: Use rayon's par_chunks for better parallelization
     let chunks: Vec<_> = coeffs.par_chunks(chunk_size)
-        .map(|chunk| {
-            chunk.iter().map(|coef| {
+        .enumerate()
+        .map(|(chunk_idx, chunk)| {
+            println!("      🔍 [SCALAR_CONVERSION] Processing chunk {} with {} elements", chunk_idx, chunk.len());
+            
+            let chunk_result: Vec<_> = chunk.iter().enumerate().map(|(elem_idx, coef)| {
+                // Add detailed debugging for the problematic conversion
+                if elem_idx < 3 || elem_idx == chunk.len() - 1 {
+                    println!("      🔍 [SCALAR_CONVERSION] Converting element {} in chunk {}: {:?}", 
+                             elem_idx, chunk_idx, coef);
+                }
+                
                 let repr: [u32; 8] = unsafe { mem::transmute_copy(&coef.to_repr()) };
-                ScalarField::from(repr)
-            }).collect::<Vec<_>>()
+                
+                if elem_idx < 3 || elem_idx == chunk.len() - 1 {
+                    println!("      🔍 [SCALAR_CONVERSION] Repr for element {}: {:?}", elem_idx, repr);
+                }
+                
+                let scalar = ScalarField::from(repr);
+                
+                if elem_idx < 3 || elem_idx == chunk.len() - 1 {
+                    println!("      🔍 [SCALAR_CONVERSION] Converted scalar for element {}: {:?}", elem_idx, scalar);
+                }
+                
+                scalar
+            }).collect();
+            
+            println!("      🔍 [SCALAR_CONVERSION] Completed chunk {} with {} elements", chunk_idx, chunk_result.len());
+            chunk_result
         })
         .collect();
     
     // Optimization 4: Flatten results efficiently
-    for chunk in chunks {
+    for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        println!("      🔍 [SCALAR_CONVERSION] Flattening chunk {} with {} elements", chunk_idx, chunk.len());
         result.extend(chunk);
     }
     
     let elapsed = start_time.elapsed();
-    if coeffs.len() > 1000 {  // Only log for large operations
-        println!("      🔄 Optimized scalar conversion: {} elements in {:.2?} ({:.2} elements/ms)", 
-                 coeffs.len(), elapsed, coeffs.len() as f64 / elapsed.as_millis().max(1) as f64);
-    }
+    println!("      🔄 Optimized scalar conversion: {} elements in {:.2?} ({:.2} elements/ms)", 
+             coeffs.len(), elapsed, coeffs.len() as f64 / elapsed.as_millis().max(1) as f64);
+    
     result
 }
 
@@ -163,6 +197,8 @@ fn c_scalars_from_icicle_scalars<G: PrimeField>(scalars: &[ScalarField]) -> Vec<
 fn icicle_points_from_c<C: CurveAffine>(bases: &[C]) -> Vec<Affine<CurveCfg>> {
     let start_time = std::time::Instant::now();
     
+    println!("      🔍 [POINT_CONVERSION] Starting conversion for {} elements", bases.len());
+    
     // Optimization 1: Pre-allocate vector with exact capacity
     let mut result = Vec::with_capacity(bases.len());
     
@@ -172,45 +208,83 @@ fn icicle_points_from_c<C: CurveAffine>(bases: &[C]) -> Vec<Affine<CurveCfg>> {
         .parse::<usize>()
         .unwrap_or(8192);
     
+    println!("      🔍 [POINT_CONVERSION] Using chunk size: {}", chunk_size);
+    
     // Optimization 3: Use rayon's par_chunks for better parallelization
     let chunks: Vec<_> = bases.par_chunks(chunk_size)
-        .map(|chunk| {
-            chunk.iter().map(|p| {
+        .enumerate()
+        .map(|(chunk_idx, chunk)| {
+            println!("      🔍 [POINT_CONVERSION] Processing chunk {} with {} elements", chunk_idx, chunk.len());
+            
+            let chunk_result: Vec<_> = chunk.iter().enumerate().map(|(elem_idx, p)| {
+                // Add detailed debugging for the problematic conversion
+                if elem_idx < 3 || elem_idx == chunk.len() - 1 {
+                    println!("      🔍 [POINT_CONVERSION] Converting point {} in chunk {}", elem_idx, chunk_idx);
+                }
+                
                 let coordinates = p.coordinates().unwrap();
+                
+                if elem_idx < 3 || elem_idx == chunk.len() - 1 {
+                    println!("      🔍 [POINT_CONVERSION] Coordinates for point {}: x={:?}, y={:?}", 
+                             elem_idx, coordinates.x(), coordinates.y());
+                }
+                
                 let x_repr: [u32; 8] = unsafe { mem::transmute_copy(&coordinates.x().to_repr()) };
                 let y_repr: [u32; 8] = unsafe { mem::transmute_copy(&coordinates.y().to_repr()) };
 
-                Affine::<CurveCfg>::from_limbs(x_repr, y_repr)
-            }).collect::<Vec<_>>()
+                if elem_idx < 3 || elem_idx == chunk.len() - 1 {
+                    println!("      🔍 [POINT_CONVERSION] Repr for point {}: x={:?}, y={:?}", elem_idx, x_repr, y_repr);
+                }
+
+                let affine = Affine::<CurveCfg>::from_limbs(x_repr, y_repr);
+                
+                if elem_idx < 3 || elem_idx == chunk.len() - 1 {
+                    println!("      🔍 [POINT_CONVERSION] Converted affine for point {}: {:?}", elem_idx, affine);
+                }
+                
+                affine
+            }).collect();
+            
+            println!("      🔍 [POINT_CONVERSION] Completed chunk {} with {} elements", chunk_idx, chunk_result.len());
+            chunk_result
         })
         .collect();
     
     // Optimization 4: Flatten results efficiently
-    for chunk in chunks {
+    for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        println!("      🔍 [POINT_CONVERSION] Flattening chunk {} with {} elements", chunk_idx, chunk.len());
         result.extend(chunk);
     }
     
     let elapsed = start_time.elapsed();
-    if bases.len() > 1000 {  // Only log for large operations
-        println!("      🔄 Optimized point conversion: {} elements in {:.2?} ({:.2} elements/ms)", 
-                 bases.len(), elapsed, bases.len() as f64 / elapsed.as_millis().max(1) as f64);
-    }
+    println!("      🔄 Optimized point conversion: {} elements in {:.2?} ({:.2} elements/ms)", 
+             bases.len(), elapsed, bases.len() as f64 / elapsed.as_millis().max(1) as f64);
+    
     result
 }
 
 fn c_from_icicle_point<C: CurveAffine>(point: &G1Projective) -> C::Curve {
+    println!("      🔍 [POINT_CONVERSION_BACK] Converting icicle point: {:?}", point);
+    
     let (x, y) = {
         let affine: Affine<CurveCfg> = Affine::<CurveCfg>::from(*point);
+        println!("      🔍 [POINT_CONVERSION_BACK] Converted to affine: {:?}", affine);
 
-        (
-            repr_from_u32::<C>(&affine.x.into()),
-            repr_from_u32::<C>(&affine.y.into()),
-        )
+        let x = repr_from_u32::<C>(&affine.x.into());
+        let y = repr_from_u32::<C>(&affine.y.into());
+        
+        println!("      🔍 [POINT_CONVERSION_BACK] Extracted x: {:?}, y: {:?}", x, y);
+        (x, y)
     };
 
+    println!("      🔍 [POINT_CONVERSION_BACK] Creating curve point from x, y");
     let affine = C::from_xy(x, y);
+    println!("      🔍 [POINT_CONVERSION_BACK] from_xy result: {:?}", affine);
 
-    return affine.unwrap().to_curve();
+    let result = affine.unwrap().to_curve();
+    println!("      🔍 [POINT_CONVERSION_BACK] Final curve result: {:?}", result);
+    
+    return result;
 }
 
 pub fn multiexp_on_device<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Curve {
@@ -300,7 +374,8 @@ pub fn batched_multiexp_on_device<C: CurveAffine>(
     let mut all_bases = Vec::new();
     let mut operation_sizes = Vec::new();
     
-    for (coeffs, bases) in operations {
+    for (i, (coeffs, bases)) in operations.iter().enumerate() {
+        println!("   🔍 [GPU_BATCHED_MSM] Operation {}: {} scalars, {} bases", i, coeffs.len(), bases.len());
         operation_sizes.push(coeffs.len());
         all_scalars.extend_from_slice(coeffs);
         all_bases.extend_from_slice(bases);
@@ -310,16 +385,20 @@ pub fn batched_multiexp_on_device<C: CurveAffine>(
              collect_elapsed, total_elements as f64 / collect_elapsed.as_millis().max(1) as f64);
     
     // Step 2: Convert scalars to GPU format
+    println!("   🔍 [GPU_BATCHED_MSM] Starting scalar conversion for {} elements", all_scalars.len());
     let scalar_start = std::time::Instant::now();
     let binding = icicle_scalars_from_c_scalars::<C::ScalarExt>(&all_scalars);
+    println!("   🔍 [GPU_BATCHED_MSM] Scalar conversion completed, result size: {}", binding.len());
     let coeffs = HostSlice::from_slice(&binding[..]);
     let scalar_elapsed = scalar_start.elapsed();
     println!("   ✅ Step 2 - Scalar conversion: {:.2?} ({:.2} elements/ms)", 
              scalar_elapsed, total_elements as f64 / scalar_elapsed.as_millis().max(1) as f64);
     
     // Step 3: Convert points to GPU format
+    println!("   🔍 [GPU_BATCHED_MSM] Starting point conversion for {} elements", all_bases.len());
     let point_start = std::time::Instant::now();
     let binding = icicle_points_from_c(&all_bases);
+    println!("   🔍 [GPU_BATCHED_MSM] Point conversion completed, result size: {}", binding.len());
     let bases = HostSlice::from_slice(&binding[..]);
     let point_elapsed = point_start.elapsed();
     println!("   ✅ Step 3 - Point conversion: {:.2?} ({:.2} elements/ms)", 
@@ -345,14 +424,22 @@ pub fn batched_multiexp_on_device<C: CurveAffine>(
     for (i, &size) in operation_sizes.iter().enumerate() {
         let op_start = std::time::Instant::now();
         
+        println!("   🔍 [GPU_BATCHED_MSM] Processing operation {} with {} elements", i, size);
+        println!("   🔍 [GPU_BATCHED_MSM] Offsets: scalars={}, bases={}", offset_scalars, offset_bases);
+        
         // Create slices using the correct API
         let coeffs_slice = HostSlice::from_slice(&coeffs.as_slice()[offset_scalars..offset_scalars + size]);
         let bases_slice = HostSlice::from_slice(&bases.as_slice()[offset_bases..offset_bases + size]);
         
+        println!("   🔍 [GPU_BATCHED_MSM] Created slices for operation {}: coeffs={}, bases={}", 
+                 i, coeffs_slice.len(), bases_slice.len());
+        
         // For single result, we need to create a new DeviceVec for each operation
         let mut single_result = DeviceVec::<G1Projective>::cuda_malloc(1).unwrap();
         
+        println!("   🔍 [GPU_BATCHED_MSM] Calling msm::msm for operation {}", i);
         msm::msm(coeffs_slice, bases_slice, &cfg, &mut single_result[..]).unwrap();
+        println!("   🔍 [GPU_BATCHED_MSM] msm::msm completed for operation {}", i);
         
         // Copy the single result to the appropriate position in the main results array
         let mut host_result = vec![G1Projective::zero(); 1];
@@ -376,10 +463,17 @@ pub fn batched_multiexp_on_device<C: CurveAffine>(
              gpu_elapsed, total_elements as f64 / gpu_elapsed.as_millis().max(1) as f64);
     
     // Step 7: Convert results back to Halo2 format
+    println!("   🔍 [GPU_BATCHED_MSM] Starting result conversion for {} results", msm_host_results.len());
     let convert_start = std::time::Instant::now();
     let results: Vec<C::Curve> = msm_host_results
         .iter()
-        .map(|point| c_from_icicle_point::<C>(point))
+        .enumerate()
+        .map(|(i, point)| {
+            println!("   🔍 [GPU_BATCHED_MSM] Converting result {}: {:?}", i, point);
+            let result = c_from_icicle_point::<C>(point);
+            println!("   🔍 [GPU_BATCHED_MSM] Converted result {}: {:?}", i, result);
+            result
+        })
         .collect();
     let convert_elapsed = convert_start.elapsed();
     println!("   ✅ Step 7 - Result conversion: {:.2?}", convert_elapsed);
