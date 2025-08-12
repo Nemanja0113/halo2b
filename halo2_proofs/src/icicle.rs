@@ -97,6 +97,57 @@ pub fn multiexp_on_device<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> 
     msm_point
 }
 
+/// Performs batch multi-exponentiation on GPU for multiple polynomials at once
+/// This is more efficient than calling multiexp_on_device multiple times
+pub fn multiexp_batch_on_device<C: CurveAffine>(
+    polynomials: &[&[C::Scalar]], 
+    bases: &[C]
+) -> Vec<C::Curve> {
+    if polynomials.is_empty() {
+        return Vec::new();
+    }
+
+    // Convert bases to Icicle format once (reused for all polynomials)
+    let binding = icicle_points_from_c(bases);
+    let bases = HostSlice::from_slice(&binding[..]);
+
+    // Allocate GPU memory for all results at once
+    let mut msm_results = DeviceVec::<G1Projective>::cuda_malloc(polynomials.len()).unwrap();
+    let cfg = msm::MSMConfig::default();
+
+    // Process each polynomial with optimized memory management
+    for (i, poly) in polynomials.iter().enumerate() {
+        // Convert polynomial to Icicle format
+        let binding = icicle_scalars_from_c_scalars::<C::ScalarExt>(poly);
+        let coeffs = HostSlice::from_slice(&binding[..]);
+
+        // Allocate temporary GPU memory for this single MSM
+        let mut single_result = DeviceVec::<G1Projective>::cuda_malloc(1).unwrap();
+
+        // Perform MSM for this polynomial
+        msm::msm(coeffs, bases, &cfg, &mut single_result[..]).unwrap();
+
+        // Copy result to the correct position in batch results array
+        let mut temp_host = vec![G1Projective::zero(); 1];
+        single_result.copy_to_host(HostSlice::from_mut_slice(&mut temp_host[..])).unwrap();
+        
+        // Copy to the correct position in batch results
+        msm_results.copy_from_host(HostSlice::from_slice(&temp_host[..]), i..i+1).unwrap();
+    }
+
+    // Copy all results back to host in a single operation
+    let mut msm_host_results = vec![G1Projective::zero(); polynomials.len()];
+    msm_results
+        .copy_to_host(HostSlice::from_mut_slice(&mut msm_host_results[..]))
+        .unwrap();
+
+    // Convert all results back to Halo2 format
+    msm_host_results
+        .into_iter()
+        .map(|point| c_from_icicle_point::<C>(&point))
+        .collect()
+}
+
 pub fn fft_on_device<Scalar: ff::PrimeField, G: FftGroup<Scalar> + ff::PrimeField>(
     scalars: &mut [G], 
     omega: Scalar, 
