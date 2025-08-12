@@ -440,7 +440,7 @@ where
                     if use_batch {
                         // Use batch MSM for better performance
                         let polynomials: Vec<_> = advice_values.iter().collect();
-                        params.commit_lagrange_batch(&polynomials, &blinds)
+                        params.commit_lagrange_batch(&polynomials, &blinds);
                         log::info!("BATCH TOOK :::::: {:?}", batch_start.elapsed());
                     } else {
                         // Use original parallel approach
@@ -448,7 +448,7 @@ where
                             .iter()
                             .zip(blinds.iter())
                             .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                            .collect()
+                            .collect();
                         
                         log::info!("GPU TOOK ::::::: {:?}", batch_start.elapsed());
                     }
