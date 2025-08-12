@@ -229,7 +229,7 @@ pub fn best_batch_multiexp_cpu<C: CurveAffine>(
     // Process each polynomial individually (CPU fallback)
     for (poly, blind) in batch_input.polynomials.iter().zip(batch_input.blinding_factors.iter()) {
         let mut scalars = Vec::with_capacity(poly.len());
-        scalars.extend(poly.iter().map(|s| s * blind));
+        scalars.extend(poly.iter().map(|s| *s * blind));
         
         let size = scalars.len();
         assert!(bases.len() >= size);
@@ -243,8 +243,8 @@ pub fn best_batch_multiexp_cpu<C: CurveAffine>(
                batch_input.len(), data_size, elapsed, data_size as f64 / elapsed.as_millis() as f64);
     
     // Update global counters
-    MSM_COUNTER.fetch_add(batch_input.len() as u64, Ordering::Relaxed);
-    MSM_CPU_COUNTER.fetch_add(batch_input.len() as u64, Ordering::Relaxed);
+    MSM_COUNTER.fetch_add(batch_input.len() as usize, Ordering::Relaxed);
+    MSM_CPU_COUNTER.fetch_add(batch_input.len() as usize, Ordering::Relaxed);
     *MSM_TOTAL_TIME.lock().unwrap() += elapsed;
     
     results
@@ -286,8 +286,8 @@ pub fn best_batch_multiexp_gpu<C: CurveAffine>(
                batch_input.len(), data_size, elapsed, data_size as f64 / elapsed.as_millis() as f64);
     
     // Update global counters
-    MSM_COUNTER.fetch_add(batch_input.len() as u64, Ordering::Relaxed);
-    MSM_GPU_COUNTER.fetch_add(batch_input.len() as u64, Ordering::Relaxed);
+    MSM_COUNTER.fetch_add(batch_input.len() as usize, Ordering::Relaxed);
+    MSM_GPU_COUNTER.fetch_add(batch_input.len() as usize, Ordering::Relaxed);
     *MSM_TOTAL_TIME.lock().unwrap() += elapsed;
     
     results
