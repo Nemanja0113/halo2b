@@ -311,18 +311,10 @@ where
         MSMKZG::new()
     }
 
-    fn commit_lagrange(&self, poly: &Polynomial<E::Fr, LagrangeCoeff>, r: Blind<E::Fr>) -> E::G1 {
-        let mut scalars = Vec::with_capacity(poly.len() + 1);
-        let mut bases = Vec::with_capacity(poly.len() + 1);
-        
-        // Add polynomial coefficients
+    fn commit_lagrange(&self, poly: &Polynomial<E::Fr, LagrangeCoeff>, _: Blind<E::Fr>) -> E::G1 {
+        let mut scalars = Vec::with_capacity(poly.len());
         scalars.extend(poly.iter());
-        bases.extend(self.g_lagrange.iter());
-        
-        // Add blinding factor term
-        scalars.push(r.0);
-        bases.push(self.g_lagrange[0]); // Use first base point for blinding
-        
+        let bases = &self.g_lagrange;
         let size = scalars.len();
         assert!(bases.len() >= size);
 
@@ -333,14 +325,15 @@ where
     fn commit_lagrange_batch(
         &self,
         polynomials: &[&Polynomial<E::Fr, LagrangeCoeff>],
-        blinds: &[Blind<E::Fr>],
+        _blinds: &[Blind<E::Fr>],
     ) -> Vec<E::G1> {
         use crate::arithmetic::{BatchMSMInput, best_batch_multiexp};
         
         let mut batch_input = BatchMSMInput::new();
         
-        for (poly, blind) in polynomials.iter().zip(blinds.iter()) {
-            batch_input.add_polynomial(poly.values.as_slice(), blind.0);
+        // Add polynomials without blinding factors (matching non-batch behavior)
+        for poly in polynomials {
+            batch_input.add_polynomial(poly.values.as_slice(), E::Fr::ZERO); // Use zero as dummy blinding
         }
         
         let bases = &self.g_lagrange;
