@@ -311,10 +311,18 @@ where
         MSMKZG::new()
     }
 
-    fn commit_lagrange(&self, poly: &Polynomial<E::Fr, LagrangeCoeff>, _: Blind<E::Fr>) -> E::G1 {
-        let mut scalars = Vec::with_capacity(poly.len());
+    fn commit_lagrange(&self, poly: &Polynomial<E::Fr, LagrangeCoeff>, r: Blind<E::Fr>) -> E::G1 {
+        let mut scalars = Vec::with_capacity(poly.len() + 1);
+        let mut bases = Vec::with_capacity(poly.len() + 1);
+        
+        // Add polynomial coefficients
         scalars.extend(poly.iter());
-        let bases = &self.g_lagrange;
+        bases.extend(self.g_lagrange.iter());
+        
+        // Add blinding factor term
+        scalars.push(r.0);
+        bases.push(self.g_lagrange[0]); // Use first base point for blinding
+        
         let size = scalars.len();
         assert!(bases.len() >= size);
 

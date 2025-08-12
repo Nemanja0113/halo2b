@@ -228,13 +228,22 @@ pub fn best_batch_multiexp_cpu<C: CurveAffine>(
     
     // Process each polynomial individually (CPU fallback)
     for (poly, blind) in batch_input.polynomials.iter().zip(batch_input.blinding_factors.iter()) {
-        let mut scalars = Vec::with_capacity(poly.len());
-        scalars.extend(poly.iter().map(|s| *s * blind));
+        // Create blinded scalars for MSM (this is the correct way to apply blinding)
+        let mut blinded_scalars = Vec::with_capacity(poly.len() + 1);
+        let mut blinded_bases = Vec::with_capacity(poly.len() + 1);
         
-        let size = scalars.len();
-        assert!(bases.len() >= size);
+        // Add polynomial coefficients
+        blinded_scalars.extend(poly.iter());
+        blinded_bases.extend(bases.iter());
         
-        let result = msm_best(&scalars, &bases[0..size]);
+        // Add blinding factor term (similar to commit_lagrange implementation)
+        blinded_scalars.push(*blind);
+        blinded_bases.push(bases[0]); // Use first base point for blinding
+        
+        let size = blinded_scalars.len();
+        assert!(blinded_bases.len() >= size);
+        
+        let result = msm_best(&blinded_scalars, &blinded_bases[0..size]);
         results.push(result);
     }
     
@@ -270,14 +279,20 @@ pub fn best_batch_multiexp_gpu<C: CurveAffine>(
     let mut results = Vec::with_capacity(batch_input.len());
     
     for (poly, blind) in batch_input.polynomials.iter().zip(batch_input.blinding_factors.iter()) {
-        // Apply blinding factor to polynomial
-        let mut blinded_scalars = Vec::with_capacity(poly.len());
-        for scalar in poly {
-            blinded_scalars.push(*scalar * blind);
-        }
+        // Create blinded scalars for MSM (this is the correct way to apply blinding)
+        let mut blinded_scalars = Vec::with_capacity(poly.len() + 1);
+        let mut blinded_bases = Vec::with_capacity(poly.len() + 1);
         
-        // Perform individual MSM on GPU
-        let result = icicle::multiexp_on_device::<C>(&blinded_scalars, bases);
+        // Add polynomial coefficients
+        blinded_scalars.extend(poly.iter());
+        blinded_bases.extend(bases.iter());
+        
+        // Add blinding factor term (similar to commit_lagrange implementation)
+        blinded_scalars.push(*blind);
+        blinded_bases.push(bases[0]); // Use first base point for blinding
+        
+        // Perform individual MSM on GPU with blinded scalars
+        let result = icicle::multiexp_on_device::<C>(&blinded_scalars, &blinded_bases);
         results.push(result);
     }
     
