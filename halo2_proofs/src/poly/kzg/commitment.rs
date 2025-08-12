@@ -321,6 +321,24 @@ where
         best_multiexp(&scalars, &bases[0..size])
     }
 
+    /// Batch commit multiple polynomials in Lagrange basis
+    fn commit_lagrange_batch(
+        &self,
+        polynomials: &[&Polynomial<E::Fr, LagrangeCoeff>],
+        blinds: &[Blind<E::Fr>],
+    ) -> Vec<E::G1> {
+        use crate::arithmetic::{BatchMSMInput, best_batch_multiexp};
+        
+        let mut batch_input = BatchMSMInput::new();
+        
+        for (poly, blind) in polynomials.iter().zip(blinds.iter()) {
+            batch_input.add_polynomial(poly.values.as_slice(), blind.0);
+        }
+        
+        let bases = &self.g_lagrange;
+        best_batch_multiexp(&batch_input, bases)
+    }
+
     /// Writes params to a buffer.
     fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()> {
         self.write_custom(writer, SerdeFormat::RawBytes)

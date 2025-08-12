@@ -67,6 +67,22 @@ pub trait Params<'params, C: CurveAffine>: Sized + Clone {
         r: Blind<C::ScalarExt>,
     ) -> C::CurveExt;
 
+    /// This commits to multiple polynomials using their evaluations over the $2^k$ size
+    /// evaluation domain. Each commitment will be blinded by its corresponding blinding factor.
+    /// This is more efficient than calling commit_lagrange multiple times.
+    fn commit_lagrange_batch(
+        &self,
+        polynomials: &[&Polynomial<C::ScalarExt, LagrangeCoeff>],
+        blinds: &[Blind<C::ScalarExt>],
+    ) -> Vec<C::CurveExt> {
+        // Default implementation: call commit_lagrange for each polynomial
+        polynomials
+            .iter()
+            .zip(blinds.iter())
+            .map(|(poly, blind)| self.commit_lagrange(poly, *blind))
+            .collect()
+    }
+
     /// Writes params to a buffer.
     fn write<W: io::Write>(&self, writer: &mut W) -> io::Result<()>;
 

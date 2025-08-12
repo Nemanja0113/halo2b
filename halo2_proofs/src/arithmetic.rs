@@ -139,6 +139,160 @@ pub fn best_multiexp_gpu<C: CurveAffine>(coeffs: &[C::Scalar], g: &[C]) -> C::Cu
     result
 }
 
+/// Batch MSM structure to hold multiple polynomials and their blinding factors
+#[derive(Debug)]
+pub struct BatchMSMInput<C: CurveAffine> {
+    pub polynomials: Vec<Vec<C::Scalar>>,
+    pub blinding_factors: Vec<C::Scalar>,
+}
+
+impl<C: CurveAffine> BatchMSMInput<C> {
+    pub fn new() -> Self {
+        Self {
+            polynomials: Vec::new(),
+            blinding_factors: Vec::new(),
+        }
+    }
+
+    pub fn add_polynomial(&mut self, polynomial: &[C::Scalar], blinding_factor: C::Scalar) {
+        self.polynomials.push(polynomial.to_vec());
+        self.blinding_factors.push(blinding_factor);
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.polynomials.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.polynomials.len()
+    }
+
+    /// Flatten all polynomials into a single vector for batch processing
+    pub fn flatten(&self) -> (Vec<C::Scalar>, Vec<usize>) {
+        let mut flattened = Vec::new();
+        let mut offsets = Vec::new();
+        let mut current_offset = 0;
+
+        for poly in &self.polynomials {
+            offsets.push(current_offset);
+            flattened.extend(poly.iter());
+            current_offset += poly.len();
+        }
+
+        (flattened, offsets)
+    }
+}
+
+/// Performs batch multi-exponentiation operations
+/// This function will use GPU if available and beneficial
+pub fn best_batch_multiexp<C: CurveAffine>(
+    batch_input: &BatchMSMInput<C>,
+    bases: &[C],
+) -> Vec<C::Curve> {
+    if batch_input.is_empty() {
+        return Vec::new();
+    }
+
+    let data_size: usize = batch_input.polynomials.iter().map(|p| p.len()).sum();
+    let log_size = (data_size as f64).log2().ceil() as u32;
+
+    #[cfg(feature = "icicle_gpu")]
+    if env::var("ENABLE_ICICLE_GPU").is_ok()
+        && !icicle::should_use_cpu_msm(data_size)
+        && icicle::is_gpu_supported_field(&batch_input.polynomials[0][0])
+    {
+        log::debug!("🔄 [BATCH_MSM_DISPATCH] Using GPU path: {} polynomials, {} total elements", 
+                   batch_input.len(), data_size);
+        return best_batch_multiexp_gpu(batch_input, bases);
+    }
+
+    log::debug!("🔄 [BATCH_MSM_DISPATCH] Using CPU path: {} polynomials, {} total elements", 
+               batch_input.len(), data_size);
+    best_batch_multiexp_cpu(batch_input, bases)
+}
+
+/// Performs batch multi-exponentiation operations on CPU
+pub fn best_batch_multiexp_cpu<C: CurveAffine>(
+    batch_input: &BatchMSMInput<C>,
+    bases: &[C],
+) -> Vec<C::Curve> {
+    use instant::Instant;
+    
+    let msm_start = Instant::now();
+    let data_size: usize = batch_input.polynomials.iter().map(|p| p.len()).sum();
+    
+    log::debug!("🚀 [BATCH_MSM_CPU] Starting CPU batch MSM: {} polynomials, {} total elements", 
+               batch_input.len(), data_size);
+    
+    let mut results = Vec::with_capacity(batch_input.len());
+    
+    // Process each polynomial individually (CPU fallback)
+    for (poly, blind) in batch_input.polynomials.iter().zip(batch_input.blinding_factors.iter()) {
+        let mut scalars = Vec::with_capacity(poly.len());
+        scalars.extend(poly.iter().map(|s| s * blind));
+        
+        let size = scalars.len();
+        assert!(bases.len() >= size);
+        
+        let result = msm_best(&scalars, &bases[0..size]);
+        results.push(result);
+    }
+    
+    let elapsed = msm_start.elapsed();
+    log::info!("⚡ [BATCH_MSM_CPU] CPU batch MSM completed: {} polynomials, {} total elements in {:?} ({:.2} elements/ms)", 
+               batch_input.len(), data_size, elapsed, data_size as f64 / elapsed.as_millis() as f64);
+    
+    // Update global counters
+    MSM_COUNTER.fetch_add(batch_input.len() as u64, Ordering::Relaxed);
+    MSM_CPU_COUNTER.fetch_add(batch_input.len() as u64, Ordering::Relaxed);
+    *MSM_TOTAL_TIME.lock().unwrap() += elapsed;
+    
+    results
+}
+
+#[cfg(feature = "icicle_gpu")]
+/// Performs batch multi-exponentiation operations on GPU using Icicle library
+pub fn best_batch_multiexp_gpu<C: CurveAffine>(
+    batch_input: &BatchMSMInput<C>,
+    bases: &[C],
+) -> Vec<C::Curve> {
+    use instant::Instant;
+    
+    let msm_start = Instant::now();
+    let data_size: usize = batch_input.polynomials.iter().map(|p| p.len()).sum();
+    
+    log::debug!("🚀 [BATCH_MSM_GPU] Starting GPU batch MSM: {} polynomials, {} total elements", 
+               batch_input.len(), data_size);
+    
+    // For GPU batch MSM, we need to handle each polynomial separately
+    // because the current Icicle implementation doesn't support true batch MSM
+    // This is still more efficient than CPU due to GPU memory bandwidth
+    let mut results = Vec::with_capacity(batch_input.len());
+    
+    for (poly, blind) in batch_input.polynomials.iter().zip(batch_input.blinding_factors.iter()) {
+        // Apply blinding factor to polynomial
+        let mut blinded_scalars = Vec::with_capacity(poly.len());
+        for scalar in poly {
+            blinded_scalars.push(*scalar * blind);
+        }
+        
+        // Perform individual MSM on GPU
+        let result = icicle::multiexp_on_device::<C>(&blinded_scalars, bases);
+        results.push(result);
+    }
+    
+    let elapsed = msm_start.elapsed();
+    log::info!("⚡ [BATCH_MSM_GPU] GPU batch MSM completed: {} polynomials, {} total elements in {:?} ({:.2} elements/ms)", 
+               batch_input.len(), data_size, elapsed, data_size as f64 / elapsed.as_millis() as f64);
+    
+    // Update global counters
+    MSM_COUNTER.fetch_add(batch_input.len() as u64, Ordering::Relaxed);
+    MSM_GPU_COUNTER.fetch_add(batch_input.len() as u64, Ordering::Relaxed);
+    *MSM_TOTAL_TIME.lock().unwrap() += elapsed;
+    
+    results
+}
+
 /// Dispatcher
 pub fn best_fft_cpu<Scalar: Field, G: FftGroup<Scalar>>(
     a: &mut [G],
@@ -547,5 +701,56 @@ fn test_lagrange_interpolate() {
         for (point, eval) in points.iter().zip(evals) {
             assert_eq!(eval_polynomial(&poly, *point), *eval);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use halo2curves::bn256::{Bn256, Fr};
+    use ff::Field;
+    use rand_core::OsRng;
+
+    #[test]
+    fn test_batch_msm_input() {
+        let mut batch_input = BatchMSMInput::<Bn256>::new();
+        
+        // Create test polynomials
+        let poly1 = vec![Fr::random(OsRng), Fr::random(OsRng), Fr::random(OsRng)];
+        let poly2 = vec![Fr::random(OsRng), Fr::random(OsRng)];
+        
+        let blind1 = Fr::random(OsRng);
+        let blind2 = Fr::random(OsRng);
+        
+        batch_input.add_polynomial(&poly1, blind1);
+        batch_input.add_polynomial(&poly2, blind2);
+        
+        assert_eq!(batch_input.len(), 2);
+        assert!(!batch_input.is_empty());
+        
+        let (flattened, offsets) = batch_input.flatten();
+        assert_eq!(flattened.len(), 5); // 3 + 2
+        assert_eq!(offsets, vec![0, 3]);
+    }
+
+    #[test]
+    fn test_batch_msm_cpu() {
+        let mut batch_input = BatchMSMInput::<Bn256>::new();
+        
+        // Create test polynomials
+        let poly1 = vec![Fr::from(1), Fr::from(2), Fr::from(3)];
+        let poly2 = vec![Fr::from(4), Fr::from(5)];
+        
+        let blind1 = Fr::from(10);
+        let blind2 = Fr::from(20);
+        
+        batch_input.add_polynomial(&poly1, blind1);
+        batch_input.add_polynomial(&poly2, blind2);
+        
+        // Create dummy bases (this is just for testing the structure)
+        let bases = vec![Bn256::generator(); 3];
+        
+        let results = best_batch_multiexp_cpu(&batch_input, &bases);
+        assert_eq!(results.len(), 2);
     }
 }

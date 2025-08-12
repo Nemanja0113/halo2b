@@ -430,11 +430,24 @@ where
                         }
                     })
                     .collect();
-                let advice_commitments_projective: Vec<_> = advice_values
-                    .iter()
-                    .zip(blinds.iter())
-                    .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                    .collect();
+
+                #[cfg(feature = "batch")]
+                let advice_commitments_projective: Vec<_> = {
+                    // Use batch MSM for better performance
+                    let polynomials: Vec<_> = advice_values.iter().collect();
+                    params.commit_lagrange_batch(&polynomials, &blinds)
+                };
+
+                #[cfg(not(feature = "batch"))]
+                let advice_commitments_projective: Vec<_> = {
+                    // Use original parallel approach
+                    advice_values
+                        .iter()
+                        .zip(blinds.iter())
+                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                        .collect()
+                };
+
                 let mut advice_commitments =
                     vec![Scheme::Curve::identity(); advice_commitments_projective.len()];
                 <Scheme::Curve as CurveAffine>::CurveExt::batch_normalize(
