@@ -16,6 +16,13 @@ use ff::Field;
 use rand_core::OsRng;
 
 fn main() {
+    // Check environment variable for batch mode
+    let use_batch = std::env::var("HALO2_BATCH_MSM").unwrap_or_default() == "1";
+    println!("🔧 Environment Variable Check:");
+    println!("   HALO2_BATCH_MSM = {:?}", std::env::var("HALO2_BATCH_MSM").unwrap_or_else(|_| "unset".to_string()));
+    println!("   Batch mode enabled: {}", use_batch);
+    println!();
+    
     // Set up parameters
     let k = 4;
     let params = ParamsKZG::<Bn256>::new(k);
@@ -94,7 +101,8 @@ fn main() {
     }
     
     println!("\n💡 Usage Instructions:");
-    println!("   - Enable batch mode: cargo build --features batch");
-    println!("   - Disable batch mode: cargo build --no-default-features");
-    println!("   - The system automatically chooses the best approach based on the feature flag");
+    println!("   - Enable batch mode: export HALO2_BATCH_MSM=1");
+    println!("   - Disable batch mode: unset HALO2_BATCH_MSM or set HALO2_BATCH_MSM=0");
+    println!("   - The system automatically chooses the best approach based on the environment variable");
+    println!("   - Example: HALO2_BATCH_MSM=1 cargo run --example batch-msm-example");
 } 

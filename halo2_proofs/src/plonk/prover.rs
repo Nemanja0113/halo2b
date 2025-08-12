@@ -431,21 +431,22 @@ where
                     })
                     .collect();
 
-                #[cfg(feature = "batch")]
                 let advice_commitments_projective: Vec<_> = {
-                    // Use batch MSM for better performance
-                    let polynomials: Vec<_> = advice_values.iter().collect();
-                    params.commit_lagrange_batch(&polynomials, &blinds)
-                };
-
-                #[cfg(not(feature = "batch"))]
-                let advice_commitments_projective: Vec<_> = {
-                    // Use original parallel approach
-                    advice_values
-                        .iter()
-                        .zip(blinds.iter())
-                        .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
-                        .collect()
+                    // Check environment variable for batch mode
+                    let use_batch = std::env::var("HALO2_BATCH_MSM").unwrap_or_default() == "1";
+                    
+                    if use_batch {
+                        // Use batch MSM for better performance
+                        let polynomials: Vec<_> = advice_values.iter().collect();
+                        params.commit_lagrange_batch(&polynomials, &blinds)
+                    } else {
+                        // Use original parallel approach
+                        advice_values
+                            .iter()
+                            .zip(blinds.iter())
+                            .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                            .collect()
+                    }
                 };
 
                 let mut advice_commitments =
