@@ -265,7 +265,8 @@ pub fn best_batch_multiexp_gpu<C: CurveAffine>(
     let polynomials: Vec<&[C::Scalar]> = batch_input.polynomials.iter().map(|p| p.as_slice()).collect();
     
     // Use the new parallelized batch MSM function
-    let results = icicle::multiexp_batch_on_device::<C>(&polynomials, bases);
+    // let results = icicle::multiexp_batch_on_device::<C>(&polynomials, bases);
+    let results = icicle::multiexp_batch_parallel_on_device::<C>(&polynomials, bases);
     
     let elapsed = msm_start.elapsed();
     log::info!("⚡ [BATCH_MSM_GPU] Parallelized GPU batch MSM completed: {} polynomials, {} total elements in {:?} ({:.2} elements/ms)", 
