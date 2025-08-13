@@ -111,41 +111,31 @@ pub fn multiexp_batch_on_device<C: CurveAffine>(
     let binding = icicle_points_from_c(bases);
     let bases = HostSlice::from_slice(&binding[..]);
 
-    // Allocate GPU memory for all results at once
-    let mut msm_results = DeviceVec::<G1Projective>::cuda_malloc(polynomials.len()).unwrap();
+    // Process each polynomial individually and collect results
+    let mut results = Vec::with_capacity(polynomials.len());
     let cfg = msm::MSMConfig::default();
 
-    // Process each polynomial with optimized memory management
-    for (i, poly) in polynomials.iter().enumerate() {
+    for poly in polynomials {
         // Convert polynomial to Icicle format
         let binding = icicle_scalars_from_c_scalars::<C::ScalarExt>(poly);
         let coeffs = HostSlice::from_slice(&binding[..]);
 
-        // Allocate temporary GPU memory for this single MSM
+        // Allocate GPU memory for this single MSM
         let mut single_result = DeviceVec::<G1Projective>::cuda_malloc(1).unwrap();
 
         // Perform MSM for this polynomial
         msm::msm(coeffs, bases, &cfg, &mut single_result[..]).unwrap();
 
-        // Copy result to the correct position in batch results array
+        // Copy result back to host
         let mut temp_host = vec![G1Projective::zero(); 1];
         single_result.copy_to_host(HostSlice::from_mut_slice(&mut temp_host[..])).unwrap();
         
-        // Copy to the correct position in batch results
-        msm_results.copy_from_host(HostSlice::from_slice(&temp_host[..]), i..i+1).unwrap();
+        // Convert result to Halo2 format and add to results
+        let result = c_from_icicle_point::<C>(&temp_host[0]);
+        results.push(result);
     }
 
-    // Copy all results back to host in a single operation
-    let mut msm_host_results = vec![G1Projective::zero(); polynomials.len()];
-    msm_results
-        .copy_to_host(HostSlice::from_mut_slice(&mut msm_host_results[..]))
-        .unwrap();
-
-    // Convert all results back to Halo2 format
-    msm_host_results
-        .into_iter()
-        .map(|point| c_from_icicle_point::<C>(&point))
-        .collect()
+    results
 }
 
 pub fn fft_on_device<Scalar: ff::PrimeField, G: FftGroup<Scalar> + ff::PrimeField>(
