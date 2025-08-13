@@ -111,26 +111,14 @@ pub fn multiexp_batch_on_device<C: CurveAffine>(
     let binding = icicle_points_from_c(bases);
     let bases = HostSlice::from_slice(&binding[..]);
 
-    // Pre-allocate all GPU memory for parallel processing
-    let num_polynomials = polynomials.len();
+    // Process each polynomial individually and collect results
+    let mut results = Vec::with_capacity(polynomials.len());
+    let cfg = msm::MSMConfig::default();
 
-    // Convert all polynomials to Icicle format in parallel
-    let mut all_coeffs: Vec<Vec<ScalarField>> = Vec::with_capacity(num_polynomials);
     for poly in polynomials {
-        let binding = icicle_scalars_from_c_scalars::<C::ScalarExt>(poly);
-        all_coeffs.push(binding);
-    }
-
-    // Process polynomials in parallel using CPU threads for GPU operations
-    // Each thread will handle one polynomial and its GPU operations
-    use maybe_rayon::prelude::*;
-    
-    let results: Vec<C::Curve> = all_coeffs.par_iter().map(|coeffs| {
         // Convert polynomial to Icicle format
-        let coeffs = HostSlice::from_slice(&coeffs[..]);
-
-        // Create MSMConfig inside each thread for thread safety
-        let cfg = msm::MSMConfig::default();
+        let binding = icicle_scalars_from_c_scalars::<C::ScalarExt>(poly);
+        let coeffs = HostSlice::from_slice(&binding[..]);
 
         // Allocate GPU memory for this single MSM
         let mut single_result = DeviceVec::<G1Projective>::cuda_malloc(1).unwrap();
@@ -142,80 +130,10 @@ pub fn multiexp_batch_on_device<C: CurveAffine>(
         let mut temp_host = vec![G1Projective::zero(); 1];
         single_result.copy_to_host(HostSlice::from_mut_slice(&mut temp_host[..])).unwrap();
         
-        // Convert result to Halo2 format
-        c_from_icicle_point::<C>(&temp_host[0])
-    }).collect();
-
-    results
-}
-
-/// Advanced parallelized batch MSM using optimized memory management and GPU streams
-/// This version provides better performance through:
-/// 1. Pre-allocated GPU memory pools
-/// 2. Optimized memory layout
-/// 3. Reduced GPU-CPU transfers
-/// 4. Better GPU utilization patterns
-#[cfg(feature = "icicle_gpu")]
-pub fn multiexp_batch_parallel_on_device<C: CurveAffine>(
-    polynomials: &[&[C::Scalar]], 
-    bases: &[C]
-) -> Vec<C::Curve> {
-    if polynomials.is_empty() {
-        return Vec::new();
+        // Convert result to Halo2 format and add to results
+        let result = c_from_icicle_point::<C>(&temp_host[0]);
+        results.push(result);
     }
-
-    // Convert bases to Icicle format once
-    let binding = icicle_points_from_c(bases);
-    let bases = HostSlice::from_slice(&binding[..]);
-
-    let num_polynomials = polynomials.len();
-
-    // Pre-allocate all GPU memory at once for better memory management
-    let mut all_results = DeviceVec::<G1Projective>::cuda_malloc(num_polynomials).unwrap();
-    
-    // Convert all polynomials to Icicle format with optimized memory layout
-    let mut all_coeffs: Vec<Vec<ScalarField>> = Vec::with_capacity(num_polynomials);
-    let mut total_coeffs = 0;
-    
-    // First pass: calculate total size and convert polynomials
-    for poly in polynomials {
-        let binding = icicle_scalars_from_c_scalars::<C::ScalarExt>(poly);
-        total_coeffs += binding.len();
-        all_coeffs.push(binding);
-    }
-
-    // Use rayon for CPU-level parallelism with optimized chunking
-    // This version processes polynomials in chunks for better GPU utilization
-    use maybe_rayon::prelude::*;
-    
-    // Process polynomials in chunks for better GPU memory management
-    // Use a reasonable chunk size based on number of polynomials
-    let chunk_size = std::cmp::max(1, num_polynomials / 4); // Use 4 chunks as default
-    let results: Vec<C::Curve> = all_coeffs
-        .chunks(chunk_size)
-        .flat_map(|chunk| {
-            chunk.par_iter().map(|coeffs| {
-                // Convert polynomial to Icicle format
-                let coeffs = HostSlice::from_slice(&coeffs[..]);
-
-                // Create MSMConfig inside each thread for thread safety
-                let cfg = msm::MSMConfig::default();
-
-                // Allocate GPU memory for this single MSM
-                let mut single_result = DeviceVec::<G1Projective>::cuda_malloc(1).unwrap();
-
-                // Perform MSM for this polynomial
-                msm::msm(coeffs, bases, &cfg, &mut single_result[..]).unwrap();
-
-                // Copy result back to host
-                let mut temp_host = vec![G1Projective::zero(); 1];
-                single_result.copy_to_host(HostSlice::from_mut_slice(&mut temp_host[..])).unwrap();
-                
-                // Convert result to Halo2 format
-                c_from_icicle_point::<C>(&temp_host[0])
-            }).collect::<Vec<_>>()
-        })
-        .collect();
 
     results
 }

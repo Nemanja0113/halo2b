@@ -258,18 +258,17 @@ pub fn best_batch_multiexp_gpu<C: CurveAffine>(
     let msm_start = Instant::now();
     let data_size: usize = batch_input.polynomials.iter().map(|p| p.len()).sum();
     
-    log::debug!("🚀 [BATCH_MSM_GPU] Starting parallelized GPU batch MSM: {} polynomials, {} total elements", 
+    log::debug!("🚀 [BATCH_MSM_GPU] Starting true GPU batch MSM: {} polynomials, {} total elements", 
                batch_input.len(), data_size);
     
     // Convert polynomials to slice references for the batch function
     let polynomials: Vec<&[C::Scalar]> = batch_input.polynomials.iter().map(|p| p.as_slice()).collect();
     
-    // Use the new parallelized batch MSM function
-    // let results = icicle::multiexp_batch_on_device::<C>(&polynomials, bases);
-    let results = icicle::multiexp_batch_parallel_on_device::<C>(&polynomials, bases);
+    // Use the new true batch MSM function
+    let results = icicle::multiexp_batch_on_device::<C>(&polynomials, bases);
     
     let elapsed = msm_start.elapsed();
-    log::info!("⚡ [BATCH_MSM_GPU] Parallelized GPU batch MSM completed: {} polynomials, {} total elements in {:?} ({:.2} elements/ms)", 
+    log::info!("⚡ [BATCH_MSM_GPU] True GPU batch MSM completed: {} polynomials, {} total elements in {:?} ({:.2} elements/ms)", 
                batch_input.len(), data_size, elapsed, data_size as f64 / elapsed.as_millis() as f64);
     
     // Update global counters
