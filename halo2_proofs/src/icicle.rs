@@ -113,7 +113,6 @@ pub fn multiexp_batch_on_device<C: CurveAffine>(
 
     // Pre-allocate all GPU memory for parallel processing
     let num_polynomials = polynomials.len();
-    let cfg = msm::MSMConfig::default();
 
     // Convert all polynomials to Icicle format in parallel
     let mut all_coeffs: Vec<Vec<ScalarField>> = Vec::with_capacity(num_polynomials);
@@ -129,6 +128,9 @@ pub fn multiexp_batch_on_device<C: CurveAffine>(
     let results: Vec<C::Curve> = all_coeffs.par_iter().map(|coeffs| {
         // Convert polynomial to Icicle format
         let coeffs = HostSlice::from_slice(&coeffs[..]);
+
+        // Create MSMConfig inside each thread for thread safety
+        let cfg = msm::MSMConfig::default();
 
         // Allocate GPU memory for this single MSM
         let mut single_result = DeviceVec::<G1Projective>::cuda_malloc(1).unwrap();
@@ -167,7 +169,6 @@ pub fn multiexp_batch_parallel_on_device<C: CurveAffine>(
     let bases = HostSlice::from_slice(&binding[..]);
 
     let num_polynomials = polynomials.len();
-    let cfg = msm::MSMConfig::default();
 
     // Pre-allocate all GPU memory at once for better memory management
     let mut all_results = DeviceVec::<G1Projective>::cuda_malloc(num_polynomials).unwrap();
@@ -188,13 +189,17 @@ pub fn multiexp_batch_parallel_on_device<C: CurveAffine>(
     use maybe_rayon::prelude::*;
     
     // Process polynomials in chunks for better GPU memory management
-    let chunk_size = std::cmp::max(1, num_polynomials / num_cpus::get());
+    // Use a reasonable chunk size based on number of polynomials
+    let chunk_size = std::cmp::max(1, num_polynomials / 4); // Use 4 chunks as default
     let results: Vec<C::Curve> = all_coeffs
         .chunks(chunk_size)
         .flat_map(|chunk| {
             chunk.par_iter().map(|coeffs| {
                 // Convert polynomial to Icicle format
                 let coeffs = HostSlice::from_slice(&coeffs[..]);
+
+                // Create MSMConfig inside each thread for thread safety
+                let cfg = msm::MSMConfig::default();
 
                 // Allocate GPU memory for this single MSM
                 let mut single_result = DeviceVec::<G1Projective>::cuda_malloc(1).unwrap();
