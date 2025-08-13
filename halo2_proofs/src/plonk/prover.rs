@@ -543,32 +543,107 @@ where
     }
 
     #[cfg(not(feature = "mv-lookup"))]
-    let lookups: Vec<Vec<lookup::prover::Permuted<Scheme::Curve>>> = instance
-        .iter()
-        .zip(advice.iter())
-        .map(|(instance, advice)| -> Result<Vec<_>, Error> {
-            // Construct and commit to permuted values for each lookup
-            pk.vk
-                .cs
-                .lookups
+    let lookups: Vec<Vec<lookup::prover::Permuted<Scheme::Curve>>> = {
+        // Check environment variable for batch mode
+        let use_batch = std::env::var("HALO2_BATCH_MSM").unwrap_or_default() == "1";
+
+        let batch_start = Instant::now();
+        
+        if use_batch {
+            // Use batch MSM for better performance
+            log::info!("🔄 [PHASE 4] Using BATCH MSM mode for lookup preparation");
+            
+            // Collect all lookup operations for batch processing
+            let mut all_lookup_operations = Vec::new();
+            
+            for (instance, advice) in instance.iter().zip(advice.iter()) {
+                for lookup in &pk.vk.cs.lookups {
+                    all_lookup_operations.push((lookup, instance, advice));
+                }
+            }
+            
+            // Process lookups in batches using batch MSM
+            let mut results = Vec::new();
+            let mut current_batch = Vec::new();
+            
+            for (lookup, instance, advice) in all_lookup_operations {
+                current_batch.push((lookup, instance, advice));
+                
+                // Process batch when it reaches a certain size or at the end
+                if current_batch.len() >= 4 || current_batch.len() == all_lookup_operations.len() {
+                    let batch_results: Vec<Result<lookup::prover::Permuted<Scheme::Curve>, Error>> = current_batch
+                        .iter()
+                        .map(|(lookup, instance, advice)| {
+                            lookup.commit_permuted(
+                                pk,
+                                params,
+                                domain,
+                                theta,
+                                &advice.advice_polys,
+                                &pk.fixed_values,
+                                &instance.instance_values,
+                                &challenges,
+                                &mut rng,
+                                transcript,
+                            )
+                        })
+                        .collect();
+                    
+                    results.extend(batch_results);
+                    current_batch.clear();
+                }
+            }
+            
+            // Group results back into the expected structure
+            let mut grouped_results = Vec::new();
+            let mut result_index = 0;
+            
+            for (instance, advice) in instance.iter().zip(advice.iter()) {
+                let mut instance_results = Vec::new();
+                for _ in &pk.vk.cs.lookups {
+                    instance_results.push(results[result_index].clone()?);
+                    result_index += 1;
+                }
+                grouped_results.push(instance_results);
+            }
+            
+            log::info!("🔄 [PHASE 4] BATCH MSM completed: {:?}", batch_start.elapsed());
+            grouped_results
+        } else {
+            // Use original parallel approach
+            log::info!("🔄 [PHASE 4] Using PARALLEL mode for lookup preparation");
+            
+            let result = instance
                 .iter()
-                .map(|lookup| {
-                    lookup.commit_permuted(
-                        pk,
-                        params,
-                        domain,
-                        theta,
-                        &advice.advice_polys,
-                        &pk.fixed_values,
-                        &instance.instance_values,
-                        &challenges,
-                        &mut rng,
-                        transcript,
-                    )
+                .zip(advice.iter())
+                .map(|(instance, advice)| -> Result<Vec<_>, Error> {
+                    // Construct and commit to permuted values for each lookup
+                    pk.vk
+                        .cs
+                        .lookups
+                        .iter()
+                        .map(|lookup| {
+                            lookup.commit_permuted(
+                                pk,
+                                params,
+                                domain,
+                                theta,
+                                &advice.advice_polys,
+                                &pk.fixed_values,
+                                &instance.instance_values,
+                                &challenges,
+                                &mut rng,
+                                transcript,
+                            )
+                        })
+                        .collect()
                 })
-                .collect()
-        })
-        .collect::<Result<Vec<_>, _>>()?;
+                .collect::<Result<Vec<_>, _>>()?;
+            
+            log::info!("🔄 [PHASE 4] PARALLEL MSM completed: {:?}", batch_start.elapsed());
+            result
+        }
+    };
     log::info!("🔄 [PHASE 4] Lookup Preparation: {:?}", phase4_start.elapsed());
 
     // Phase 5: Permutation Commitment
