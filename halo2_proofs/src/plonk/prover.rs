@@ -661,6 +661,7 @@ where
     {
         for lookups_ in &lookups {
             for lookup in lookups_.iter() {
+                log::info!("look 5:");
                 transcript.write_point(lookup.commitment)?;
             }
         }
