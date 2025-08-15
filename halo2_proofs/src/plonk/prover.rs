@@ -26,9 +26,6 @@ use super::lookup;
 #[cfg(feature = "mv-lookup")]
 use super::mv_lookup as lookup;
 
-// Add parallel processing support for synthesis optimization
-use maybe_rayon::iter::{IntoParallelIterator, ParallelIterator, IntoParallelRefMutIterator};
-
 use crate::{
     arithmetic::{eval_polynomial, CurveAffine},
     circuit::Value,
