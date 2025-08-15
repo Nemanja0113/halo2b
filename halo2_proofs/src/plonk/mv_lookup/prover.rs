@@ -93,6 +93,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         C: CurveAffine<ScalarExt = F>,
         C::Curve: Mul<F, Output = C::Curve> + MulAssign<F>,
     {
+        log::info!("LOOKUP PREPARATION -- INSIDE");
         let n = params.n() as usize;
         // Closure to get values of expressions and compress them
         let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
