@@ -548,11 +548,13 @@ where
         .zip(advice.iter())
         .map(|(instance, advice)| -> Result<Vec<_>, Error> {
             // Construct and commit to permuted values for each lookup
+            log::info!("LOOKUP PREPARATION: {:?}", instance.instance_values);
             pk.vk
                 .cs
                 .lookups
                 .iter()
                 .map(|lookup| {
+                    log::info!("LOOKUP PREPARATION ::: commit_permuted");
                     lookup.commit_permuted(
                         pk,
                         params,
