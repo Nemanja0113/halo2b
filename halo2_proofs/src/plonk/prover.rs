@@ -19,12 +19,15 @@ use super::{
     ChallengeY, Error, ProvingKey,
 };
 #[cfg(feature = "mv-lookup")]
-use maybe_rayon::iter::{IndexedParallelIterator, ParallelIterator, IntoParallelIterator, IntoParallelRefIterator, IntoParallelRefMutIterator};
+use maybe_rayon::iter::{IndexedParallelIterator, ParallelIterator};
 
 #[cfg(not(feature = "mv-lookup"))]
 use super::lookup;
 #[cfg(feature = "mv-lookup")]
 use super::mv_lookup as lookup;
+
+#[cfg(feature = "mv-lookup")]
+use maybe_rayon::iter::{IntoParallelIterator, IntoParallelRefIterator};
 
 use crate::{
     arithmetic::{eval_polynomial, CurveAffine},
@@ -334,7 +337,6 @@ where
             };
             instances.len()
         ];
-
         let s = FxBuildHasher;
         let mut challenges =
             HashMap::<usize, Scheme::Scalar>::with_capacity_and_hasher(meta.num_challenges, s);
@@ -355,59 +357,36 @@ where
                 })
                 .collect::<BTreeSet<_>>();
 
-            // Check if we should use parallel synthesis for better performance
-            let use_parallel_synthesis = std::env::var("HALO2_PARALLEL_SYNTHESIS").unwrap_or_default() == "1";
-            
-            // Pre-allocate witness collections to reduce memory allocations
-            let mut witness_pool: Vec<WitnessCollection<Scheme::Scalar>> = Vec::with_capacity(circuits.len());
-            for _ in 0..circuits.len() {
-                witness_pool.push(WitnessCollection {
+            for ((circuit, advice), instances) in
+                circuits.iter().zip(advice.iter_mut()).zip(instances)
+            {
+                let circuit_start = Instant::now();
+                let mut witness = WitnessCollection {
                     k: params.k(),
                     current_phase,
                     advice: vec![domain.empty_lagrange_assigned(); meta.num_advice_columns],
                     unblinded_advice: HashSet::from_iter(meta.unblinded_advice_columns.clone()),
-                                         instances: &[], // Will be set per circuit
+                    instances,
                     challenges: &challenges,
+                    // The prover will not be allowed to assign values to advice
+                    // cells that exist within inactive rows, which include some
+                    // number of blinding factors and an extra row for use in the
+                    // permutation argument.
                     usable_rows: ..unusable_rows_start,
                     _marker: std::marker::PhantomData,
-                });
-            }
-            
-            // Check if we should use synthesis caching for repeated circuits
-            let use_synthesis_cache = std::env::var("HALO2_SYNTHESIS_CACHE").unwrap_or_default() == "1";
-            let mut synthesis_cache: HashMap<u64, WitnessCollection<Scheme::Scalar>> = HashMap::default();
-            
-                                      // Sequential synthesis (original approach)
-             for ((circuit, advice), instances) in
-                 circuits.iter().zip(advice.iter_mut()).zip(instances)
-             {
-                 let circuit_start = Instant::now();
-                 let mut witness = WitnessCollection {
-                     k: params.k(),
-                     current_phase,
-                     advice: vec![domain.empty_lagrange_assigned(); meta.num_advice_columns],
-                     unblinded_advice: HashSet::from_iter(meta.unblinded_advice_columns.clone()),
-                     instances,
-                     challenges: &challenges,
-                     // The prover will not be allowed to assign values to advice
-                     // cells that exist within inactive rows, which include some
-                     // number of blinding factors and an extra row for use in the
-                     // permutation argument.
-                     usable_rows: ..unusable_rows_start,
-                     _marker: std::marker::PhantomData,
-                 };
+                };
 
-                 let synthesis_start = Instant::now();
-                 // Synthesize the circuit to obtain the witness and other information.
-                 ConcreteCircuit::FloorPlanner::synthesize(
-                     &mut witness,
-                     circuit,
-                     config.clone(),
-                     meta.constants.clone(),
-                 )?;
-                 log::debug!("    Circuit synthesis: {:?}", synthesis_start.elapsed());
+                let synthesis_start = Instant::now();
+                // Synthesize the circuit to obtain the witness and other information.
+                ConcreteCircuit::FloorPlanner::synthesize(
+                    &mut witness,
+                    circuit,
+                    config.clone(),
+                    meta.constants.clone(),
+                )?;
+                log::debug!("    Circuit synthesis: {:?}", synthesis_start.elapsed());
 
-                 let batch_invert_start = Instant::now();
+                let batch_invert_start = Instant::now();
                 let mut advice_values = batch_invert_assigned::<Scheme::Scalar>(
                     witness
                         .advice
@@ -529,7 +508,6 @@ where
     let start = Instant::now();
 
     #[cfg(feature = "mv-lookup")]
-    log::info!("LOOKUP PREPARATION - 1:");
     let lookups: Vec<Vec<lookup::prover::Prepared<Scheme::Curve>>> = instance
         .par_iter()
         .zip(advice.par_iter())
@@ -554,7 +532,6 @@ where
                 .collect()
         })
         .collect::<Result<Vec<_>, _>>()?;
-    log::info!("LOOKUP PREPARATION - 1 ::: end");
 
     #[cfg(feature = "mv-lookup")]
     {
@@ -626,27 +603,23 @@ where
 
     // preallocate the lookups
 
-    log::info!("look 1:");
     #[cfg(feature = "mv-lookup")]
     let phi_blinds = (0..pk.vk.cs.blinding_factors())
         .map(|_| Scheme::Scalar::random(&mut rng))
         .collect::<Vec<_>>();
 
-    log::info!("look 2:");
     #[cfg(feature = "mv-lookup")]
     let commit_lookups = || -> Result<Vec<Vec<lookup::prover::Committed<Scheme::Curve>>>, _> {
         lookups
             .into_iter()
             .map(|lookups| -> Result<Vec<_>, _> {
                 // Construct and commit to products for each lookup
-                log::info!("look 2.1:");
                 #[cfg(feature = "metal")]
                 let res = lookups
                     .into_iter()
                     .map(|lookup| lookup.commit_grand_sum(&pk.vk, params, beta, &phi_blinds))
                     .collect::<Result<Vec<_>, _>>();
 
-                log::info!("look 2.2:");
                 #[cfg(not(feature = "metal"))]
                 let res = lookups
                     .into_par_iter()
@@ -657,7 +630,6 @@ where
             })
             .collect::<Result<Vec<_>, _>>()
     };
-    log::info!("look 3:");
 
     #[cfg(not(feature = "mv-lookup"))]
     let commit_lookups = || -> Result<Vec<Vec<lookup::prover::Committed<Scheme::Curve>>>, _> {
@@ -674,7 +646,6 @@ where
             })
             .collect::<Result<Vec<_>, _>>()
     };
-    log::info!("look 4:");
 
     // Phase 6: Lookup Product Commitments
     let phase6_start = Instant::now();
@@ -684,7 +655,6 @@ where
     {
         for lookups_ in &lookups {
             for lookup in lookups_.iter() {
-                log::info!("look 5:");
                 transcript.write_point(lookup.commitment)?;
             }
         }

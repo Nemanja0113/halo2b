@@ -93,7 +93,6 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         C: CurveAffine<ScalarExt = F>,
         C::Curve: Mul<F, Output = C::Curve> + MulAssign<F>,
     {
-        log::info!("LOOKUP PREPARATION -- INSIDE");
         let n = params.n() as usize;
         // Closure to get values of expressions and compress them
         let compress_expressions = |expressions: &[Expression<C::Scalar>]| {
@@ -227,8 +226,6 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         // write commitment of m(X) to transcript
         // transcript.write_point(m_commitment)?;
 
-        log::info!("LOOKUP PREPARATION -- INSIDE - END");
-
         Ok(Prepared {
             compressed_inputs_expressions,
             compressed_table_expression,
@@ -246,9 +243,6 @@ impl<C: CurveAffine> Prepared<C> {
         beta: ChallengeBeta<C>,
         phi_blinds: &[C::Scalar],
     ) -> Result<Committed<C>, Error> {
-        log::info!("🚀 [COMMIT_GRAND_SUM] Starting commit_grand_sum function");
-        let function_start = instant::Instant::now();
-        
         /*
             φ_i(X) = f_i(X) + α
             τ(X) = t(X) + α
@@ -412,19 +406,13 @@ impl<C: CurveAffine> Prepared<C> {
 
         let grand_sum_blind = Blind(C::Scalar::ZERO);
         let start = instant::Instant::now();
-        log::info!("🔍 [COMMIT_GRAND_SUM] Starting phi_commitment MSM operation");
         let phi_commitment = params
             .commit_lagrange(&phi, grand_sum_blind.clone())
             .to_affine();
-        let msm_elapsed = start.elapsed();
-        log::info!("⚡ [COMMIT_GRAND_SUM] phi_commitment MSM completed in {:?}", msm_elapsed);
         log::trace!(" - phi_commitment {:?}", start.elapsed());
 
         // Hash grand sum commitment
         // transcript.write_point(phi_commitment)?;
-
-        let function_elapsed = function_start.elapsed();
-        log::info!("✅ [COMMIT_GRAND_SUM] commit_grand_sum function completed in {:?}", function_elapsed);
 
         Ok(Committed {
             m_poly: vk.domain.lagrange_to_coeff(self.m_values),
