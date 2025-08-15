@@ -619,12 +619,14 @@ where
             .map(|lookups| -> Result<Vec<_>, _> {
                 // Construct and commit to products for each lookup
                 #[cfg(feature = "metal")]
+                log::info!("look 2.1:");
                 let res = lookups
                     .into_iter()
                     .map(|lookup| lookup.commit_grand_sum(&pk.vk, params, beta, &phi_blinds))
                     .collect::<Result<Vec<_>, _>>();
 
                 #[cfg(not(feature = "metal"))]
+                log::info!("look 2.2:");
                 let res = lookups
                     .into_par_iter()
                     .map(|lookup| lookup.commit_grand_sum(&pk.vk, params, beta, &phi_blinds))
