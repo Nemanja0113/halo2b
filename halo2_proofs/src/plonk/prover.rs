@@ -331,6 +331,7 @@ where
     }
 
     // Phase 3: Witness Collection and Advice Preparation
+    let phase3_start = Instant::now();
     let (advice, challenges) = {
         let mut advice = vec![
             AdviceSingle::<Scheme::Curve, LagrangeCoeff> {
@@ -419,29 +420,28 @@ where
                             log::debug!("    Circuit {}: Using cached synthesis result", idx);
                             witness = synthesis_cache.get(&circuit_hash).unwrap().clone();
                         } else {
-                        
-                        // Synthesize the circuit
-                        let result = ConcreteCircuit::FloorPlanner::synthesize(
-                            &mut witness,
-                            circuit,
-                            config.clone(),
-                            meta.constants.clone(),
-                        );
-                        
-                        let synthesis_elapsed = synthesis_start.elapsed();
-                        log::debug!("    Circuit synthesis: {:?}", synthesis_elapsed);
-                        
-                        // Cache the result if caching is enabled
-                        if use_synthesis_cache && result.is_ok() {
-                            synthesis_cache.insert(circuit_hash, witness.clone());
+                            // Synthesize the circuit
+                            let result = ConcreteCircuit::FloorPlanner::synthesize(
+                                &mut witness,
+                                circuit,
+                                config.clone(),
+                                meta.constants.clone(),
+                            );
+                            
+                            let synthesis_elapsed = synthesis_start.elapsed();
+                            log::debug!("    Circuit synthesis: {:?}", synthesis_elapsed);
+                            
+                            // Cache the result if caching is enabled
+                            if use_synthesis_cache && result.is_ok() {
+                                synthesis_cache.insert(circuit_hash, witness.clone());
+                            }
+                            
+                            // Return witness for further processing
+                            match result {
+                                Ok(()) => Ok(witness),
+                                Err(e) => Err(e),
+                            }
                         }
-                        
-                        // Return witness for further processing
-                        match result {
-                            Ok(()) => Ok(witness),
-                            Err(e) => Err(e),
-                        }
-                    }
                     })
                     .collect::<Result<Vec<_>, _>>()?;
                 
