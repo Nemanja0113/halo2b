@@ -337,10 +337,13 @@ where
             };
             instances.len()
         ];
+        log::info!(" phase 3 took : 1 {:?}", phase3_start.elapsed());
+
         let s = FxBuildHasher;
         let mut challenges =
             HashMap::<usize, Scheme::Scalar>::with_capacity_and_hasher(meta.num_challenges, s);
 
+        log::info!(" phase 3 took : 2 {:?}", phase3_start.elapsed());
         let unusable_rows_start = params.n() as usize - (meta.blinding_factors() + 1);
         for current_phase in pk.vk.cs.phases() {
             let phase_sub_start = Instant::now();
