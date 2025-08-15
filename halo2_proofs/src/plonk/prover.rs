@@ -8,6 +8,7 @@ use rustc_hash::FxHashSet as HashSet;
 use std::collections::BTreeSet;
 use std::iter;
 use std::ops::RangeTo;
+use std::any;
 
 use super::{
     circuit::{
@@ -377,6 +378,12 @@ where
                 };
 
                 let synthesis_start = Instant::now();
+                
+                // Log the circuit type and floor planner being used
+                log::info!("🔧 [CIRCUIT_SYNTHESIS] Circuit type: {}, FloorPlanner: {}", 
+                          std::any::type_name::<ConcreteCircuit>(), 
+                          std::any::type_name::<ConcreteCircuit::FloorPlanner>());
+                
                 // Synthesize the circuit to obtain the witness and other information.
                 ConcreteCircuit::FloorPlanner::synthesize(
                     &mut witness,
