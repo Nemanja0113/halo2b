@@ -29,6 +29,9 @@ use super::mv_lookup as lookup;
 #[cfg(feature = "mv-lookup")]
 use maybe_rayon::iter::{IntoParallelIterator, IntoParallelRefIterator};
 
+// Add parallel processing support for synthesis optimization
+use maybe_rayon::iter::{IntoParallelIterator, ParallelIterator};
+
 use crate::{
     arithmetic::{eval_polynomial, CurveAffine},
     circuit::Value,
@@ -328,7 +331,6 @@ where
     }
 
     // Phase 3: Witness Collection and Advice Preparation
-    let phase3_start = Instant::now();
     let (advice, challenges) = {
         let mut advice = vec![
             AdviceSingle::<Scheme::Curve, LagrangeCoeff> {
@@ -337,13 +339,11 @@ where
             };
             instances.len()
         ];
-        log::info!(" phase 3 took : 1 {:?}", phase3_start.elapsed());
 
         let s = FxBuildHasher;
         let mut challenges =
             HashMap::<usize, Scheme::Scalar>::with_capacity_and_hasher(meta.num_challenges, s);
 
-        log::info!(" phase 3 took : 2 {:?}", phase3_start.elapsed());
         let unusable_rows_start = params.n() as usize - (meta.blinding_factors() + 1);
         for current_phase in pk.vk.cs.phases() {
             let phase_sub_start = Instant::now();
@@ -360,34 +360,208 @@ where
                 })
                 .collect::<BTreeSet<_>>();
 
-            for ((circuit, advice), instances) in
-                circuits.iter().zip(advice.iter_mut()).zip(instances)
-            {
-                let circuit_start = Instant::now();
-                let mut witness = WitnessCollection {
+            // Check if we should use parallel synthesis for better performance
+            let use_parallel_synthesis = std::env::var("HALO2_PARALLEL_SYNTHESIS").unwrap_or_default() == "1";
+            
+            // Pre-allocate witness collections to reduce memory allocations
+            let mut witness_pool: Vec<WitnessCollection<Scheme::Scalar>> = Vec::with_capacity(circuits.len());
+            for _ in 0..circuits.len() {
+                witness_pool.push(WitnessCollection {
                     k: params.k(),
                     current_phase,
                     advice: vec![domain.empty_lagrange_assigned(); meta.num_advice_columns],
                     unblinded_advice: HashSet::from_iter(meta.unblinded_advice_columns.clone()),
-                    instances,
+                    instances: Vec::new(), // Will be set per circuit
                     challenges: &challenges,
-                    // The prover will not be allowed to assign values to advice
-                    // cells that exist within inactive rows, which include some
-                    // number of blinding factors and an extra row for use in the
-                    // permutation argument.
                     usable_rows: ..unusable_rows_start,
                     _marker: std::marker::PhantomData,
-                };
+                });
+            }
+            
+            // Check if we should use synthesis caching for repeated circuits
+            let use_synthesis_cache = std::env::var("HALO2_SYNTHESIS_CACHE").unwrap_or_default() == "1";
+            let mut synthesis_cache: HashMap<u64, WitnessCollection<Scheme::Scalar>> = HashMap::default();
+            
+            if use_parallel_synthesis && circuits.len() > 1 {
+                // Parallel synthesis for multiple circuits
+                log::info!("🚀 [SYNTHESIS] Using parallel synthesis for {} circuits", circuits.len());
+                
+                let synthesis_results: Vec<_> = circuits
+                    .par_iter()
+                    .zip(advice.par_iter_mut())
+                    .zip(instances)
+                    .enumerate()
+                    .map(|(idx, ((circuit, advice), instances))| {
+                        let synthesis_start = Instant::now();
+                        
+                        // Reuse pre-allocated witness collection from pool
+                        let mut witness = std::mem::take(&mut witness_pool[idx]);
+                        witness.instances = instances;
+                        
+                        // Reset advice columns without reallocating
+                        for advice_col in &mut witness.advice {
+                            advice_col.clear();
+                            advice_col.extend(domain.empty_lagrange_assigned());
+                        }
+                        
+                        // Check synthesis cache if enabled
+                        let circuit_hash = if use_synthesis_cache {
+                            // Simple hash based on circuit instance data
+                            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                            use std::hash::{Hash, Hasher};
+                            instances.hash(&mut hasher);
+                            hasher.finish()
+                        } else {
+                            0
+                        };
+                        
+                        if use_synthesis_cache && synthesis_cache.contains_key(&circuit_hash) {
+                            log::debug!("    Circuit {}: Using cached synthesis result", idx);
+                            witness = synthesis_cache.get(&circuit_hash).unwrap().clone();
+                        } else {
+                        
+                        // Synthesize the circuit
+                        let result = ConcreteCircuit::FloorPlanner::synthesize(
+                            &mut witness,
+                            circuit,
+                            config.clone(),
+                            meta.constants.clone(),
+                        );
+                        
+                        let synthesis_elapsed = synthesis_start.elapsed();
+                        log::debug!("    Circuit synthesis: {:?}", synthesis_elapsed);
+                        
+                        // Cache the result if caching is enabled
+                        if use_synthesis_cache && result.is_ok() {
+                            synthesis_cache.insert(circuit_hash, witness.clone());
+                        }
+                        
+                        // Return witness for further processing
+                        match result {
+                            Ok(()) => Ok(witness),
+                            Err(e) => Err(e),
+                        }
+                    }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+                
+                // Process synthesis results sequentially for post-processing
+                for (idx, ((circuit, advice), instances)) in 
+                    circuits.iter().zip(advice.iter_mut()).zip(instances).enumerate() 
+                {
+                    let witness = synthesis_results[idx].clone();
+                    
+                    // Continue with batch invert, blinding, and commitments...
+                    let batch_invert_start = Instant::now();
+                    let mut advice_values = batch_invert_assigned::<Scheme::Scalar>(
+                        witness
+                            .advice
+                            .into_iter()
+                            .enumerate()
+                            .filter_map(|(column_index, advice)| {
+                                if column_indices.contains(&column_index) {
+                                    Some(advice)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect(),
+                    );
+                    log::debug!("    Batch invert: {:?}", batch_invert_start.elapsed());
 
-                let synthesis_start = Instant::now();
-                // Synthesize the circuit to obtain the witness and other information.
-                ConcreteCircuit::FloorPlanner::synthesize(
-                    &mut witness,
-                    circuit,
-                    config.clone(),
-                    meta.constants.clone(),
-                )?;
-                log::debug!("    Circuit synthesis: {:?}", synthesis_start.elapsed());
+                    let blinding_start = Instant::now();
+                    // Add blinding factors to advice columns
+                    for (column_index, advice_values) in column_indices.iter().zip(&mut advice_values) {
+                        if !witness.unblinded_advice.contains(column_index) {
+                            for cell in &mut advice_values[unusable_rows_start..] {
+                                *cell = Scheme::Scalar::random(&mut rng);
+                            }
+                        } else {
+                            for cell in &mut advice_values[unusable_rows_start..] {
+                                *cell = Blind::default().0;
+                            }
+                        }
+                    }
+                    log::debug!("    Blinding factors: {:?}", blinding_start.elapsed());
+
+                    let commitment_start = Instant::now();
+                    // Compute commitments to advice column polynomials
+                    let blinds: Vec<_> = column_indices
+                        .iter()
+                        .map(|i| {
+                            if witness.unblinded_advice.contains(i) {
+                                Blind::default()
+                            } else {
+                                Blind(Scheme::Scalar::random(&mut rng))
+                            }
+                        })
+                        .collect();
+
+                    let advice_commitments_projective: Vec<_> = {
+                        // Check environment variable for batch mode
+                        let use_batch = std::env::var("HALO2_BATCH_MSM").unwrap_or_default() == "1";
+
+                        let batch_start = Instant::now();
+                        
+                        if use_batch {
+                            // Use batch MSM for better performance
+                            let polynomials: Vec<_> = advice_values.iter().collect();
+                            let result = params.commit_lagrange_batch(&polynomials, &blinds);
+                            log::info!("BATCH TOOK :::::: {:?}", batch_start.elapsed());
+                            result
+                        } else {
+                            // Use original parallel approach
+                            let result = advice_values
+                                .iter()
+                                .zip(blinds.iter())
+                                .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
+                                .collect();
+                            log::info!("GPU TOOK ::::::: {:?}", batch_start.elapsed());
+                            result
+                        }
+                    };
+
+                    let mut advice_commitments =
+                        vec![Scheme::Curve::identity(); advice_commitments_projective.len()];
+                    <Scheme::Curve as CurveAffine>::CurveExt::batch_normalize(
+                        &advice_commitments_projective,
+                        &mut advice_commitments,
+                    );
+                    *advice = advice_commitments;
+                    drop(advice_commitments_projective);
+
+                    log::debug!("    Advice commitments: {:?}", commitment_start.elapsed());
+                }
+            } else {
+                // Sequential synthesis (original approach)
+                for ((circuit, advice), instances) in
+                    circuits.iter().zip(advice.iter_mut()).zip(instances)
+                {
+                    let circuit_start = Instant::now();
+                    let mut witness = WitnessCollection {
+                        k: params.k(),
+                        current_phase,
+                        advice: vec![domain.empty_lagrange_assigned(); meta.num_advice_columns],
+                        unblinded_advice: HashSet::from_iter(meta.unblinded_advice_columns.clone()),
+                        instances,
+                        challenges: &challenges,
+                        // The prover will not be allowed to assign values to advice
+                        // cells that exist within inactive rows, which include some
+                        // number of blinding factors and an extra row for use in the
+                        // permutation argument.
+                        usable_rows: ..unusable_rows_start,
+                        _marker: std::marker::PhantomData,
+                    };
+
+                    let synthesis_start = Instant::now();
+                    // Synthesize the circuit to obtain the witness and other information.
+                    ConcreteCircuit::FloorPlanner::synthesize(
+                        &mut witness,
+                        circuit,
+                        config.clone(),
+                        meta.constants.clone(),
+                    )?;
+                    log::debug!("    Circuit synthesis: {:?}", synthesis_start.elapsed());
 
                 let batch_invert_start = Instant::now();
                 let mut advice_values = batch_invert_assigned::<Scheme::Scalar>(
