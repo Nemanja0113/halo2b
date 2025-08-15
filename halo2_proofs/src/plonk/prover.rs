@@ -502,12 +502,15 @@ where
     // Phase 4: Lookup Preparation
     let phase4_start = Instant::now();
     
+    log::info!("LOOKUP PREPARATION - 0:");
     // Sample theta challenge for keeping lookup columns linearly independent
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
+    log::info!("LOOKUP PREPARATION - 0 ::: end");
 
     let start = Instant::now();
 
     #[cfg(feature = "mv-lookup")]
+    log::info!("LOOKUP PREPARATION - 1:");
     let lookups: Vec<Vec<lookup::prover::Prepared<Scheme::Curve>>> = instance
         .par_iter()
         .zip(advice.par_iter())
@@ -534,6 +537,7 @@ where
         .collect::<Result<Vec<_>, _>>()?;
 
     #[cfg(feature = "mv-lookup")]
+    log::info!("LOOKUP PREPARATION - 2: ");
     {
         for lookups_ in &lookups {
             for lookup in lookups_.iter() {
@@ -548,13 +552,13 @@ where
         .zip(advice.iter())
         .map(|(instance, advice)| -> Result<Vec<_>, Error> {
             // Construct and commit to permuted values for each lookup
-            log::info!("LOOKUP PREPARATION: {:?}", instance.instance_values);
+            log::info!("LOOKUP PREPARATION - 3: {:?}", instance.instance_values);
             pk.vk
                 .cs
                 .lookups
                 .iter()
                 .map(|lookup| {
-                    log::info!("LOOKUP PREPARATION ::: commit_permuted");
+                    log::info!("LOOKUP PREPARATION -3 ::: commit_permuted");
                     lookup.commit_permuted(
                         pk,
                         params,
