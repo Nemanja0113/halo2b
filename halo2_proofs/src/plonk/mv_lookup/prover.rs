@@ -227,13 +227,14 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
         // write commitment of m(X) to transcript
         // transcript.write_point(m_commitment)?;
 
+        log::info!("LOOKUP PREPARATION -- INSIDE - END");
+
         Ok(Prepared {
             compressed_inputs_expressions,
             compressed_table_expression,
             m_values,
             commitment: m_commitment,
         })
-        log::info!("LOOKUP PREPARATION -- INSIDE - END");
     }
 }
 
