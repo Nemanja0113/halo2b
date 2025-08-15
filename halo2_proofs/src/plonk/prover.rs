@@ -605,11 +605,13 @@ where
 
     // preallocate the lookups
 
+    log::info!("look 1:");
     #[cfg(feature = "mv-lookup")]
     let phi_blinds = (0..pk.vk.cs.blinding_factors())
         .map(|_| Scheme::Scalar::random(&mut rng))
         .collect::<Vec<_>>();
 
+    log::info!("look 2:");
     #[cfg(feature = "mv-lookup")]
     let commit_lookups = || -> Result<Vec<Vec<lookup::prover::Committed<Scheme::Curve>>>, _> {
         lookups
@@ -632,6 +634,7 @@ where
             })
             .collect::<Result<Vec<_>, _>>()
     };
+    log::info!("look 3:");
 
     #[cfg(not(feature = "mv-lookup"))]
     let commit_lookups = || -> Result<Vec<Vec<lookup::prover::Committed<Scheme::Curve>>>, _> {
@@ -648,6 +651,7 @@ where
             })
             .collect::<Result<Vec<_>, _>>()
     };
+    log::info!("look 4:");
 
     // Phase 6: Lookup Product Commitments
     let phase6_start = Instant::now();
