@@ -233,6 +233,7 @@ impl<F: WithSmallOrderMulGroup<3>> Argument<F> {
             m_values,
             commitment: m_commitment,
         })
+        log::info!("LOOKUP PREPARATION -- INSIDE - END");
     }
 }
 
