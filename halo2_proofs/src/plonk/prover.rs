@@ -562,6 +562,7 @@ where
                         meta.constants.clone(),
                     )?;
                     log::debug!("    Circuit synthesis: {:?}", synthesis_start.elapsed());
+                }
 
                 let batch_invert_start = Instant::now();
                 let mut advice_values = batch_invert_assigned::<Scheme::Scalar>(
