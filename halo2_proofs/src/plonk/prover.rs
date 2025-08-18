@@ -705,9 +705,11 @@ where
     
     // Commit to the vanishing argument's random polynomial for blinding h(x_3)
     let vanishing = vanishing::Argument::commit(params, domain, &mut rng, transcript)?;
+    info!("🔄 [PHASE 8] Vanishing Argument - 1 - : {:?}", phase8_start.elapsed());
 
     // Obtain challenge for keeping all separate gates linearly independent
     let y: ChallengeY<_> = transcript.squeeze_challenge_scalar();
+    info!("🔄 [PHASE 8] Vanishing Argument - 2 - : {:?}", phase8_start.elapsed());
 
     // Calculate the advice polys
     let advice: Vec<AdviceSingle<Scheme::Curve, Coeff>> = advice
@@ -728,6 +730,7 @@ where
         )
         .collect();
 
+    info!("🔄 [PHASE 8] Vanishing Argument - 3 - : {:?}", phase8_start.elapsed());
     // Evaluate the h(X) polynomial
     let h_poly = pk.ev.evaluate_h(
         pk,
@@ -748,7 +751,7 @@ where
         &shuffles,
         &permutations,
     );
-
+    info!("🔄 [PHASE 8] Vanishing Argument - 4 - : {:?}", phase8_start.elapsed());
     // Construct the vanishing argument's h(X) commitments
     let vanishing = vanishing.construct(params, domain, h_poly, &mut rng, transcript)?;
     
