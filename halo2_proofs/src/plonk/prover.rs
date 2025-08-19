@@ -732,25 +732,54 @@ where
 
     log::info!("🔄 [PHASE 8] Vanishing Argument - 3 - : {:?}", phase8_start.elapsed());
     // Evaluate the h(X) polynomial
-    let h_poly = pk.ev.evaluate_h(
-        pk,
-        &advice
-            .iter()
-            .map(|a| a.advice_polys.as_slice())
-            .collect::<Vec<_>>(),
-        &instance
-            .iter()
-            .map(|i| i.instance_polys.as_slice())
-            .collect::<Vec<_>>(),
-        &challenges,
-        *y,
-        *beta,
-        *gamma,
-        *theta,
-        &lookups,
-        &shuffles,
-        &permutations,
-    );
+    let h_poly = {
+        // Check if batch processing is enabled via environment variable
+        let use_batch = std::env::var("HALO2_BATCH_EVALUATE_H").unwrap_or_default() == "1";
+        
+        if use_batch {
+            log::info!("🚀 [BATCH] Using batch processing for evaluate_h");
+            pk.ev.evaluate_h_batch(
+                pk,
+                &advice
+                    .iter()
+                    .map(|a| a.advice_polys.as_slice())
+                    .collect::<Vec<_>>(),
+                &instance
+                    .iter()
+                    .map(|i| i.instance_polys.as_slice())
+                    .collect::<Vec<_>>(),
+                &challenges,
+                *y,
+                *beta,
+                *gamma,
+                *theta,
+                &lookups,
+                &shuffles,
+                &permutations,
+            )
+        } else {
+            log::info!("🔄 [STANDARD] Using standard processing for evaluate_h");
+            pk.ev.evaluate_h(
+                pk,
+                &advice
+                    .iter()
+                    .map(|a| a.advice_polys.as_slice())
+                    .collect::<Vec<_>>(),
+                &instance
+                    .iter()
+                    .map(|i| i.instance_polys.as_slice())
+                    .collect::<Vec<_>>(),
+                &challenges,
+                *y,
+                *beta,
+                *gamma,
+                *theta,
+                &lookups,
+                &shuffles,
+                &permutations,
+            )
+        }
+    };
     log::info!("🔄 [PHASE 8] Vanishing Argument - 4 - : {:?}", phase8_start.elapsed());
     // Construct the vanishing argument's h(X) commitments
     let vanishing = vanishing.construct(params, domain, h_poly, &mut rng, transcript)?;
