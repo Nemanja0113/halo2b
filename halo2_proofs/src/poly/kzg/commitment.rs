@@ -385,20 +385,6 @@ where
         best_multiexp(&scalars, &bases[0..size])
     }
 
-    /// Batch commit multiple polynomials in coefficient basis
-    fn commit_batch(
-        &self,
-        polynomials: &[&Polynomial<E::Fr, Coeff>],
-        _blinds: &[Blind<E::Fr>],
-    ) -> Vec<E::G1Affine> {
-        // For now, fall back to individual commitments to avoid size mismatch issues
-        // TODO: Implement proper batch MSM when polynomial sizes are uniform
-        polynomials
-            .iter()
-            .map(|poly| self.commit(poly, Blind::default()).to_affine())
-            .collect()
-    }
-
     fn get_g(&self) -> &[E::G1Affine] {
         &self.g
     }

@@ -209,7 +209,6 @@ where
             .reduce(|acc, poly| acc + &poly)
             .unwrap();
 
-        // Write first commitment to transcript immediately (needed for challenge generation)
         let h = self.params.commit(&h_x, Blind::default()).to_affine();
         transcript.write_point(h)?;
         let u: ChallengeU<_> = transcript.squeeze_challenge_scalar();
@@ -292,7 +291,6 @@ where
             _marker: PhantomData,
         };
 
-        // Write second commitment to transcript
         let h = self.params.commit(&h_x, Blind::default()).to_affine();
         transcript.write_point(h)?;
 

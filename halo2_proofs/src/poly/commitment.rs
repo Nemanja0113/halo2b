@@ -6,7 +6,6 @@ use super::{
 use crate::transcript::{EncodedChallenge, TranscriptRead, TranscriptWrite};
 use crate::{helpers::SerdePrimeField, poly::Error};
 use ff::Field;
-use group::Curve;
 use halo2curves::CurveAffine;
 use rand_core::RngCore;
 
@@ -104,22 +103,6 @@ pub trait ParamsProver<'params, C: CurveAffine>: Params<'params, C> {
     /// factor `r`.
     fn commit(&self, poly: &Polynomial<C::ScalarExt, Coeff>, r: Blind<C::ScalarExt>)
         -> C::CurveExt;
-
-    /// This computes commitments to multiple polynomials described by the provided
-    /// slice of coefficients. Each commitment may be blinded by its corresponding
-    /// blinding factor. This is more efficient than calling commit multiple times.
-    fn commit_batch(
-        &self,
-        polynomials: &[&Polynomial<C::ScalarExt, Coeff>],
-        blinds: &[Blind<C::ScalarExt>],
-    ) -> Vec<C> {
-        // Default implementation: call commit for each polynomial
-        polynomials
-            .iter()
-            .zip(blinds.iter())
-            .map(|(poly, blind)| self.commit(poly, *blind).to_affine())
-            .collect()
-    }
 
     /// Getter for g generators
     fn get_g(&self) -> &[C];
