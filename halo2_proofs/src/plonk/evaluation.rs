@@ -930,10 +930,6 @@ impl<C: CurveAffine> Evaluator<C> {
                     // Calculated here so these only have to be kept in memory for the short time
                     // they are actually needed.
 
-                    #[cfg(feature = "precompute-coset")]
-                    let (product_coset, permuted_input_coset, permuted_table_coset) = &cosets.remove(0);
-
-                    #[cfg(not(feature = "precompute-coset"))]
                     let (product_coset, permuted_input_coset, permuted_table_coset) = {
                         let product_coset = pk.vk.domain.coeff_to_extended(&lookup.product_poly);
                         let permuted_input_coset =
