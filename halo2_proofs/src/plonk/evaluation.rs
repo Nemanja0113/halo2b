@@ -928,7 +928,7 @@ impl<C: CurveAffine> Evaluator<C> {
         
         // Pre-compute all cosets in parallel for all instances using batch processing
         let start = instant::Instant::now();
-        let advice_cosets: Vec<Vec<Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>>> = advice_polys
+        let advice_cosets: Vec<Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>> = advice_polys
             .par_iter()
             .map(|advice_polys| {
                 // Use batch conversion for better performance
@@ -939,7 +939,7 @@ impl<C: CurveAffine> Evaluator<C> {
         log::trace!(" - Batch Advice cosets: {:?}", start.elapsed());
 
         let start = instant::Instant::now();
-        let instance_cosets: Vec<Vec<Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>>> = instance_polys
+        let instance_cosets: Vec<Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>> = instance_polys
             .par_iter()
             .map(|instance_polys| {
                 // Use batch conversion for better performance
@@ -982,8 +982,8 @@ impl<C: CurveAffine> Evaluator<C> {
                             let gate_result = self.custom_gates.evaluate(
                                 &mut eval_data,
                                 fixed,
-                                advice,
-                                instance,
+                                advice.as_slice(),
+                                instance.as_slice(),
                                 challenges,
                                 &beta,
                                 &gamma,
@@ -1029,64 +1029,64 @@ impl<C: CurveAffine> Evaluator<C> {
                 let first_set = sets.first().unwrap();
                 let last_set = sets.last().unwrap();
 
-                // Batch permutation constraints
-                parallelize(&mut values, |values, start| {
-                    let mut beta_term = extended_omega.pow_vartime([start as u64, 0, 0, 0]);
-                    for (i, value) in values.iter_mut().enumerate() {
-                        let idx = start + i;
-                        let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
-                        let r_last = get_rotation_idx(idx, last_rotation.0, rot_scale, isize);
+                                        // Batch permutation constraints
+                        parallelize(&mut values, |values, start| {
+                            let mut beta_term = extended_omega.pow_vartime([start as u64, 0, 0, 0]);
+                            for (i, value) in values.iter_mut().enumerate() {
+                                let idx = start + i;
+                                let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
+                                let r_last = get_rotation_idx(idx, last_rotation.0, rot_scale, isize);
 
-                        // Batch process permutation constraints
-                        let mut perm_value = C::ScalarExt::ZERO;
-                        
-                        // First set constraints
-                        perm_value = perm_value * y
-                            + ((one - first_set.permutation_product_coset[idx]) * l0[idx]);
-                        
-                        // Last set constraints  
-                        perm_value = perm_value * y
-                            + ((last_set.permutation_product_coset[idx]
-                                * last_set.permutation_product_coset[idx]
-                                - last_set.permutation_product_coset[idx])
-                                * l_last[idx]);
-                        
-                        // Middle set constraints
-                        for (set_idx, set) in sets.iter().enumerate() {
-                            if set_idx != 0 {
+                                // Batch process permutation constraints
+                                let mut perm_value = C::ScalarExt::ZERO;
+                                
+                                // First set constraints
                                 perm_value = perm_value * y
-                                    + ((set.permutation_product_coset[idx]
-                                        - permutation.sets[set_idx - 1].permutation_product_coset
-                                            [r_last])
-                                        * l0[idx]);
-                            }
-                        }
-                        
-                        // Product constraints
-                        let mut current_delta = delta_start * beta_term;
-                        for ((set, columns), cosets) in sets
-                            .iter()
-                            .zip(p.columns.chunks(chunk_len))
-                            .zip(pk.permutation.cosets.chunks(chunk_len))
-                        {
-                            let mut left = set.permutation_product_coset[r_next];
-                            for (values, permutation) in columns
-                                .iter()
-                                .map(|&column| match column.column_type() {
-                                    Any::Advice(_) => &advice[column.index()],
-                                    Any::Fixed => &fixed[column.index()],
-                                    Any::Instance => &instance[column.index()],
-                                })
-                                .zip(cosets.iter())
+                                    + ((one - first_set.permutation_product_coset[idx]) * l0[idx]);
+                                
+                                // Last set constraints  
+                                perm_value = perm_value * y
+                                    + ((last_set.permutation_product_coset[idx]
+                                        * last_set.permutation_product_coset[idx]
+                                        - last_set.permutation_product_coset[idx])
+                                        * l_last[idx]);
+                                
+                                // Middle set constraints
+                                for (set_idx, set) in sets.iter().enumerate() {
+                                    if set_idx != 0 {
+                                        perm_value = perm_value * y
+                                            + ((set.permutation_product_coset[idx]
+                                                - permutation.sets[set_idx - 1].permutation_product_coset
+                                                    [r_last])
+                                                * l0[idx]);
+                                    }
+                                }
+                                
+                                // Product constraints
+                                let mut current_delta = delta_start * beta_term;
+                                for ((set, columns), cosets) in sets
+                                    .iter()
+                                    .zip(p.columns.chunks(chunk_len))
+                                    .zip(pk.permutation.cosets.chunks(chunk_len))
+                                {
+                                    let mut left = set.permutation_product_coset[r_next];
+                                    for (values, permutation) in columns
+                                        .iter()
+                                        .map(|&column| match column.column_type() {
+                                            Any::Advice(_) => &advice.as_slice()[column.index()],
+                                            Any::Fixed => &fixed[column.index()],
+                                            Any::Instance => &instance.as_slice()[column.index()],
+                                        })
+                                        .zip(cosets.iter())
                             {
                                 left *= values[idx] + beta * permutation[idx] + gamma;
                             }
 
                             let mut right = set.permutation_product_coset[idx];
                             for values in columns.iter().map(|&column| match column.column_type() {
-                                Any::Advice(_) => &advice[column.index()],
+                                Any::Advice(_) => &advice.as_slice()[column.index()],
                                 Any::Fixed => &fixed[column.index()],
-                                Any::Instance => &instance[column.index()],
+                                Any::Instance => &instance.as_slice()[column.index()],
                             }) {
                                 right *= values[idx] + current_delta + gamma;
                                 current_delta *= &C::Scalar::DELTA;
@@ -1143,8 +1143,8 @@ impl<C: CurveAffine> Evaluator<C> {
                                 input_lookup_evaluator.evaluate(
                                     input_eval_data,
                                     fixed,
-                                    advice,
-                                    instance,
+                                    advice.as_slice(),
+                                    instance.as_slice(),
                                     challenges,
                                     &beta,
                                     &gamma,
@@ -1404,8 +1404,6 @@ impl<C: CurveAffine> GraphEvaluator<C> {
             C::ScalarExt::ZERO
         }
     }
-
-    /// Batch convert multiple polynomials from coefficient to extended Lagrange form
 }
 
 impl<C: CurveAffine> Evaluator<C> {
