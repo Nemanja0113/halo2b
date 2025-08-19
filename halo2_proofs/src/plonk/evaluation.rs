@@ -1031,54 +1031,54 @@ impl<C: CurveAffine> Evaluator<C> {
                 let last_set = sets.last().unwrap();
 
                                         // Batch permutation constraints
-                        parallelize(&mut values, |values, start| {
-                            let mut beta_term = extended_omega.pow_vartime([start as u64, 0, 0, 0]);
-                            for (i, value) in values.iter_mut().enumerate() {
-                                let idx = start + i;
-                                let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
-                                let r_last = get_rotation_idx(idx, last_rotation.0, rot_scale, isize
+                parallelize(&mut values, |values, start| {
+                    let mut beta_term = extended_omega.pow_vartime([start as u64, 0, 0, 0]);
+                    for (i, value) in values.iter_mut().enumerate() {
+                        let idx = start + i;
+                        let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
+                        let r_last = get_rotation_idx(idx, last_rotation.0, rot_scale, isize);
 
-                                // Batch process permutation constraints
-                                let mut perm_value = C::ScalarExt::ZERO;
-                                
-                                // First set constraints
+                        // Batch process permutation constraints
+                        let mut perm_value = C::ScalarExt::ZERO;
+                        
+                        // First set constraints
+                        perm_value = perm_value * y
+                            + ((one - first_set.permutation_product_coset[idx]) * l0[idx]);
+                        
+                        // Last set constraints  
+                        perm_value = perm_value * y
+                            + ((last_set.permutation_product_coset[idx]
+                                * last_set.permutation_product_coset[idx]
+                                - last_set.permutation_product_coset[idx])
+                                * l_last[idx]);
+                        
+                        // Middle set constraints
+                        for (set_idx, set) in sets.iter().enumerate() {
+                            if set_idx != 0 {
                                 perm_value = perm_value * y
-                                    + ((one - first_set.permutation_product_coset[idx]) * l0[idx]);
-                                
-                                // Last set constraints  
-                                perm_value = perm_value * y
-                                    + ((last_set.permutation_product_coset[idx]
-                                        * last_set.permutation_product_coset[idx]
-                                        - last_set.permutation_product_coset[idx])
-                                        * l_last[idx]);
-                                
-                                // Middle set constraints
-                                for (set_idx, set) in sets.iter().enumerate() {
-                                    if set_idx != 0 {
-                                        perm_value = perm_value * y
-                                            + ((set.permutation_product_coset[idx]
-                                                - permutation.sets[set_idx - 1].permutation_product_coset
-                                                    [r_last])
-                                                * l0[idx]);
-                                    }
-                                }
-                                
-                                // Product constraints
-                                let mut current_delta = delta_start * beta_term;
-                                for ((set, columns), cosets) in sets
-                                    .iter()
-                                    .zip(p.columns.chunks(chunk_len))
-                                    .zip(pk.permutation.cosets.chunks(chunk_len))
-                                {
-                                    let mut left = set.permutation_product_coset[r_next];
-                                    for (values, permutation) in columns
-                                        .iter()
-                                        .map(|&column| match column.column_type() {
-                                            Any::Advice(_) => &advice.as_slice()[column.index()],
-                                            Any::Fixed => &fixed[column.index()],
-                                            Any::Instance => &instance.as_slice()[column.index()],
-                                        })
-                                        .zip(cosets.iter())
+                                    + ((set.permutation_product_coset[idx]
+                                        - permutation.sets[set_idx - 1].permutation_product_coset
+                                            [r_last])
+                                        * l0[idx]);
+                            }
+                        }
+                        
+                        // Product constraints
+                        let mut current_delta = delta_start * beta_term;
+                        for ((set, columns), cosets) in sets
+                            .iter()
+                            .zip(p.columns.chunks(chunk_len))
+                            .zip(pk.permutation.cosets.chunks(chunk_len))
+                        {
+                            let mut left = set.permutation_product_coset[r_next];
+                            for (values, permutation) in columns
+                                .iter()
+                                .map(|&column| match column.column_type() {
+                                    Any::Advice(_) => &advice.as_slice()[column.index()],
+                                    Any::Fixed => &fixed[column.index()],
+                                    Any::Instance => &instance.as_slice()[column.index()],
+                                })
+                                .zip(cosets.iter())
                             {
                                 left *= values[idx] + beta * permutation[idx] + gamma;
                             }
