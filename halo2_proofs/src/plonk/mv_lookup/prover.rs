@@ -34,7 +34,7 @@ pub(in crate::plonk) struct Prepared<C: CurveAffine> {
     pub(in crate::plonk) commitment: C,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(in crate::plonk) struct Committed<C: CurveAffine> {
     pub(in crate::plonk) m_poly: Polynomial<C::Scalar, Coeff>,
     pub(in crate::plonk) phi_poly: Polynomial<C::Scalar, Coeff>,
