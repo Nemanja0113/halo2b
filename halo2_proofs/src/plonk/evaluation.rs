@@ -502,13 +502,7 @@ impl<C: CurveAffine> Evaluator<C> {
                         .chunks(chunk_len)
                         .collect();
                     
-                    // Pre-compute delta powers to avoid repeated calculations
-                    let mut delta_powers = Vec::with_capacity(chunk_len);
-                    let mut current_delta_power = C::Scalar::ONE;
-                    for _ in 0..chunk_len {
-                        delta_powers.push(current_delta_power);
-                        current_delta_power *= &C::Scalar::DELTA;
-                    }
+                    // Note: We keep the original delta progression logic to maintain mathematical correctness
                     
                     // Permutation constraints with optimizations
                     parallelize(&mut values, |values, start| {
@@ -565,9 +559,10 @@ impl<C: CurveAffine> Evaluator<C> {
 
                                 let mut right = set.permutation_product_coset[idx];
                                 
-                                // Optimized right calculation using pre-computed mappings and delta powers
-                                for (values, (permutation, &delta_power)) in columns.iter().zip(cosets.iter().zip(delta_powers.iter())) {
-                                    right *= values[idx] + current_delta * delta_power + gamma;
+                                // Optimized right calculation using pre-computed mappings
+                                for (values, permutation) in columns.iter().zip(cosets.iter()) {
+                                    right *= values[idx] + current_delta + gamma;
+                                    current_delta *= &C::Scalar::DELTA;  // Keep the original delta progression
                                 }
 
                                 *value = *value * y + ((left - right) * l_active_row[idx]);
@@ -651,7 +646,7 @@ impl<C: CurveAffine> Evaluator<C> {
                     });
                 }
             }
-            log::trace!(" - Permutations: {:?}", start.elapsed());
+            log::info!(" - Permutations: {:?}", start.elapsed());
 
             let start = instant::Instant::now();
             // For lookups, compute inputs_inv_sum = ∑ 1 / (f_i(X) + α)
