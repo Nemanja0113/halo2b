@@ -1406,6 +1406,9 @@ impl<C: CurveAffine> GraphEvaluator<C> {
     }
 
     /// Batch convert multiple polynomials from coefficient to extended Lagrange form
+}
+
+impl<C: CurveAffine> Evaluator<C> {
     /// This is more efficient than converting them individually
     fn batch_coeff_to_extended(
         domain: &EvaluationDomain<C::Scalar>,
