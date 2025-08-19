@@ -478,175 +478,77 @@ impl<C: CurveAffine> Evaluator<C> {
                 let first_set = sets.first().unwrap();
                 let last_set = sets.last().unwrap();
 
-                // Check environment variable for optimization
-                let use_optimized = std::env::var("HALO2_OPTIMIZE_PERMUTATIONS").unwrap_or_default() == "1";
-                
-                if use_optimized {
-                    log::info!("🚀 [OPTIMIZED] Using optimized permutation constraints computation");
-                    
-                    // OPTIMIZED VERSION: Pre-compute column mappings and reduce redundant calculations
-                    let eval_start = instant::Instant::now();
-                    
-                    // Pre-compute column type mappings to avoid repeated match operations
-                    let column_mappings: Vec<_> = p.columns
-                        .iter()
-                        .map(|&column| match column.column_type() {
-                            Any::Advice(_) => &advice[column.index()],
-                            Any::Fixed => &fixed[column.index()],
-                            Any::Instance => &instance[column.index()],
-                        })
-                        .collect();
-                    
-                    // Pre-compute chunked column mappings
-                    let chunked_column_mappings: Vec<_> = column_mappings
-                        .chunks(chunk_len)
-                        .collect();
-                    
-                    // Note: We keep the original delta progression logic to maintain mathematical correctness
-                    
-                    // Permutation constraints with optimizations
-                    parallelize(&mut values, |values, start| {
-                        let mut beta_term = extended_omega.pow_vartime([start as u64, 0, 0, 0]);
-                        
-                        for (i, value) in values.iter_mut().enumerate() {
-                            let idx = start + i;
-                            let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
-                            let r_last = get_rotation_idx(idx, last_rotation.0, rot_scale, isize);
+                // Permutation constraints
+                parallelize(&mut values, |values, start| {
+                    let mut beta_term = extended_omega.pow_vartime([start as u64, 0, 0, 0]);
+                    for (i, value) in values.iter_mut().enumerate() {
+                        let idx = start + i;
+                        let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
+                        let r_last = get_rotation_idx(idx, last_rotation.0, rot_scale, isize);
 
-                            // Enforce only for the first set.
-                            // l_0(X) * (1 - z_0(X)) = 0
-                            *value = *value * y
-                                + ((one - first_set.permutation_product_coset[idx]) * l0[idx]);
-                            
-                            // Enforce only for the last set.
-                            // l_last(X) * (z_l(X)^2 - z_l(X)) = 0
-                            *value = *value * y
-                                + ((last_set.permutation_product_coset[idx]
-                                    * last_set.permutation_product_coset[idx]
-                                    - last_set.permutation_product_coset[idx])
-                                    * l_last[idx]);
-                            
-                            // Except for the first set, enforce.
-                            // l_0(X) * (z_i(X) - z_{i-1}(\omega^(last) X)) = 0
-                            for (set_idx, set) in sets.iter().enumerate() {
-                                if set_idx != 0 {
-                                    *value = *value * y
-                                        + ((set.permutation_product_coset[idx]
-                                            - permutation.sets[set_idx - 1].permutation_product_coset
-                                                [r_last])
-                                            * l0[idx]);
-                                }
+                        // Enforce only for the first set.
+                        // l_0(X) * (1 - z_0(X)) = 0
+                        *value = *value * y
+                            + ((one - first_set.permutation_product_coset[idx]) * l0[idx]);
+                        // Enforce only for the last set.
+                        // l_last(X) * (z_l(X)^2 - z_l(X)) = 0
+                        *value = *value * y
+                            + ((last_set.permutation_product_coset[idx]
+                                * last_set.permutation_product_coset[idx]
+                                - last_set.permutation_product_coset[idx])
+                                * l_last[idx]);
+                        // Except for the first set, enforce.
+                        // l_0(X) * (z_i(X) - z_{i-1}(\omega^(last) X)) = 0
+                        for (set_idx, set) in sets.iter().enumerate() {
+                            if set_idx != 0 {
+                                *value = *value * y
+                                    + ((set.permutation_product_coset[idx]
+                                        - permutation.sets[set_idx - 1].permutation_product_coset
+                                            [r_last])
+                                        * l0[idx]);
                             }
-                            
-                            // And for all the sets we enforce:
-                            // (1 - (l_last(X) + l_blind(X))) * (
-                            //   z_i(\omega X) \prod_j (p(X) + \beta s_j(X) + \gamma)
-                            // - z_i(X) \prod_j (p(X) + \delta^j \beta X + \gamma)
-                            // )
-                            let mut current_delta = delta_start * beta_term;
-                            
-                            for ((set, columns), cosets) in sets
-                                .iter()
-                                .zip(chunked_column_mappings.iter())
-                                .zip(pk.permutation.cosets.chunks(chunk_len))
-                            {
-                                let mut left = set.permutation_product_coset[r_next];
-                                
-                                // Optimized left calculation using pre-computed mappings
-                                for (values, permutation) in columns.iter().zip(cosets.iter()) {
-                                    left *= values[idx] + beta * permutation[idx] + gamma;
-                                }
-
-                                let mut right = set.permutation_product_coset[idx];
-                                
-                                // Optimized right calculation using pre-computed mappings
-                                for (values, permutation) in columns.iter().zip(cosets.iter()) {
-                                    right *= values[idx] + current_delta + gamma;
-                                    current_delta *= &C::Scalar::DELTA;  // Keep the original delta progression
-                                }
-
-                                *value = *value * y + ((left - right) * l_active_row[idx]);
-                            }
-                            beta_term *= &extended_omega;
                         }
-                    });
-                    
-                    log::debug!("    Total permutation evaluation time: {:?}", eval_start.elapsed());
-                } else {
-                    log::info!("🔄 [STANDARD] Using standard permutation constraints computation");
-                    
-                    // ORIGINAL VERSION
-                    parallelize(&mut values, |values, start| {
-                        let mut beta_term = extended_omega.pow_vartime([start as u64, 0, 0, 0]);
-                        for (i, value) in values.iter_mut().enumerate() {
-                            let idx = start + i;
-                            let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
-                            let r_last = get_rotation_idx(idx, last_rotation.0, rot_scale, isize);
-
-                            // Enforce only for the first set.
-                            // l_0(X) * (1 - z_0(X)) = 0
-                            *value = *value * y
-                                + ((one - first_set.permutation_product_coset[idx]) * l0[idx]);
-                            // Enforce only for the last set.
-                            // l_last(X) * (z_l(X)^2 - z_l(X)) = 0
-                            *value = *value * y
-                                + ((last_set.permutation_product_coset[idx]
-                                    * last_set.permutation_product_coset[idx]
-                                    - last_set.permutation_product_coset[idx])
-                                    * l_last[idx]);
-                            // Except for the first set, enforce.
-                            // l_0(X) * (z_i(X) - z_{i-1}(\omega^(last) X)) = 0
-                            for (set_idx, set) in sets.iter().enumerate() {
-                                if set_idx != 0 {
-                                    *value = *value * y
-                                        + ((set.permutation_product_coset[idx]
-                                            - permutation.sets[set_idx - 1].permutation_product_coset
-                                                [r_last])
-                                            * l0[idx]);
-                                }
-                            }
-                            // And for all the sets we enforce:
-                            // (1 - (l_last(X) + l_blind(X))) * (
-                            //   z_i(\omega X) \prod_j (p(X) + \beta s_j(X) + \gamma)
-                            // - z_i(X) \prod_j (p(X) + \delta^j \beta X + \gamma)
-                            // )
-                            let mut current_delta = delta_start * beta_term;
-                            for ((set, columns), cosets) in sets
+                        // And for all the sets we enforce:
+                        // (1 - (l_last(X) + l_blind(X))) * (
+                        //   z_i(\omega X) \prod_j (p(X) + \beta s_j(X) + \gamma)
+                        // - z_i(X) \prod_j (p(X) + \delta^j \beta X + \gamma)
+                        // )
+                        let mut current_delta = delta_start * beta_term;
+                        for ((set, columns), cosets) in sets
+                            .iter()
+                            .zip(p.columns.chunks(chunk_len))
+                            .zip(pk.permutation.cosets.chunks(chunk_len))
+                        {
+                            let mut left = set.permutation_product_coset[r_next];
+                            for (values, permutation) in columns
                                 .iter()
-                                .zip(p.columns.chunks(chunk_len))
-                                .zip(pk.permutation.cosets.chunks(chunk_len))
-                            {
-                                let mut left = set.permutation_product_coset[r_next];
-                                for (values, permutation) in columns
-                                    .iter()
-                                    .map(|&column| match column.column_type() {
-                                        Any::Advice(_) => &advice[column.index()],
-                                        Any::Fixed => &fixed[column.index()],
-                                        Any::Instance => &instance[column.index()],
-                                    })
-                                    .zip(cosets.iter())
-                                {
-                                    left *= values[idx] + beta * permutation[idx] + gamma;
-                                }
-
-                                let mut right = set.permutation_product_coset[idx];
-                                for values in columns.iter().map(|&column| match column.column_type() {
+                                .map(|&column| match column.column_type() {
                                     Any::Advice(_) => &advice[column.index()],
                                     Any::Fixed => &fixed[column.index()],
                                     Any::Instance => &instance[column.index()],
-                                }) {
-                                    right *= values[idx] + current_delta + gamma;
-                                    current_delta *= &C::Scalar::DELTA;
-                                }
-
-                                *value = *value * y + ((left - right) * l_active_row[idx]);
+                                })
+                                .zip(cosets.iter())
+                            {
+                                left *= values[idx] + beta * permutation[idx] + gamma;
                             }
-                            beta_term *= &extended_omega;
+
+                            let mut right = set.permutation_product_coset[idx];
+                            for values in columns.iter().map(|&column| match column.column_type() {
+                                Any::Advice(_) => &advice[column.index()],
+                                Any::Fixed => &fixed[column.index()],
+                                Any::Instance => &instance[column.index()],
+                            }) {
+                                right *= values[idx] + current_delta + gamma;
+                                current_delta *= &C::Scalar::DELTA;
+                            }
+
+                            *value = *value * y + ((left - right) * l_active_row[idx]);
                         }
-                    });
-                }
+                        beta_term *= &extended_omega;
+                    }
+                });
             }
-            log::info!(" - Permutations: {:?}", start.elapsed());
+            log::trace!(" - Permutations: {:?}", start.elapsed());
 
             let start = instant::Instant::now();
             // For lookups, compute inputs_inv_sum = ∑ 1 / (f_i(X) + α)
