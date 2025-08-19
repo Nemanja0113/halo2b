@@ -25,7 +25,7 @@ struct Compressed<C: CurveAffine> {
     shuffle_expression: Polynomial<C::Scalar, LagrangeCoeff>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(in crate::plonk) struct Committed<C: CurveAffine> {
     pub(in crate::plonk) product_poly: Polynomial<C::Scalar, Coeff>,
     product_blind: Blind<C::Scalar>,

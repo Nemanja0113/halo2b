@@ -44,7 +44,7 @@ pub(in crate::plonk) struct Permuted<C: CurveAffine> {
     permuted_table_blind: Blind<C::Scalar>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 #[allow(dead_code)]
 pub(in crate::plonk) struct Committed<C: CurveAffine> {
     pub(in crate::plonk) permuted_input_poly: Polynomial<C::Scalar, Coeff>,
