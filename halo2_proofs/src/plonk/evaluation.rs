@@ -554,67 +554,165 @@ impl<C: CurveAffine> Evaluator<C> {
             // The outer vector has capacity self.lookups.len()
             // The middle vector has capacity domain.extended_len()
             // The inner vector has capacity
-            log::trace!("num lookups: {}", lookups.len());
+            log::info!("num lookups: {}", lookups.len());
 
             #[cfg(feature = "mv-lookup")]
-            let inputs_inv_sum_cosets: Vec<_> = lookups
-                .par_iter()
-                .enumerate()
-                .map(|(n, lookup)| {
-                    let (inputs_lookup_evaluator, _) = &self.lookups[n];
-                    let mut inputs_eval_data: Vec<_> = inputs_lookup_evaluator
-                        .iter()
-                        .map(|input_lookup_evaluator| input_lookup_evaluator.instance())
-                        .collect();
+            let inputs_inv_sum_cosets: Vec<_> = {
+                // Check environment variable for optimization
+                let use_optimized = std::env::var("HALO2_OPTIMIZE_LOOKUP_INV").unwrap_or_default() == "1";
+                
+                if use_optimized {
+                    log::info!("🚀 [OPTIMIZED] Using optimized lookup inverse sum computation");
+                    
+                    // OPTIMIZED VERSION: Improved memory allocation and reduced nested parallelization
+                    lookups
+                        .par_iter()
+                        .enumerate()
+                        .map(|(n, lookup)| {
+                            let (inputs_lookup_evaluator, _) = &self.lookups[n];
+                            let num_inputs = inputs_lookup_evaluator.len();
+                            let extended_len = domain.extended_len();
+                            
+                            // Pre-allocate evaluation data once
+                            let mut inputs_eval_data: Vec<_> = inputs_lookup_evaluator
+                                .iter()
+                                .map(|input_lookup_evaluator| input_lookup_evaluator.instance())
+                                .collect();
 
-                    let mut inputs_values_for_extended_domain: Vec<C::Scalar> =
-                        Vec::with_capacity(self.lookups[n].0.len() * domain.extended_len());
-                    for idx in 0..domain.extended_len() {
-                        // For each compressed input column, evaluate at ω^i and add beta
-                        // This is a vector of length self.lookups[n].0.len()
-                        let inputs_values: Vec<C::ScalarExt> = inputs_lookup_evaluator
-                            .par_iter()
-                            .zip(inputs_eval_data.par_iter_mut())
-                            .map(|(input_lookup_evaluator, input_eval_data)| {
-                                input_lookup_evaluator.evaluate(
-                                    input_eval_data,
-                                    fixed,
-                                    advice,
-                                    instance,
-                                    challenges,
-                                    &beta,
-                                    &gamma,
-                                    &theta,
-                                    &y,
-                                    &C::ScalarExt::ZERO,
-                                    idx,
-                                    rot_scale,
-                                    isize,
-                                )
-                            })
-                            .collect();
+                            // Pre-allocate the entire buffer with exact capacity
+                            let mut inputs_values_for_extended_domain: Vec<C::Scalar> =
+                                Vec::with_capacity(num_inputs * extended_len);
+                            
+                            // Process domain points in chunks to reduce memory pressure
+                            let chunk_size = 10000; // Process 10k points at a time
+                            for chunk_start in (0..extended_len).step_by(chunk_size) {
+                                let chunk_end = std::cmp::min(chunk_start + chunk_size, extended_len);
+                                
+                                // Pre-allocate chunk results
+                                let mut chunk_results: Vec<Vec<C::ScalarExt>> = Vec::with_capacity(chunk_end - chunk_start);
+                                
+                                // Process this chunk in parallel
+                                let chunk_indices: Vec<usize> = (chunk_start..chunk_end).collect();
+                                chunk_results = chunk_indices
+                                    .par_iter()
+                                    .map(|&idx| {
+                                        // Create a fresh evaluation data for this thread to avoid borrow issues
+                                        let mut thread_eval_data: Vec<_> = inputs_lookup_evaluator
+                                            .iter()
+                                            .map(|input_lookup_evaluator| input_lookup_evaluator.instance())
+                                            .collect();
+                                        
+                                        // Evaluate all input expressions for this domain point
+                                        inputs_lookup_evaluator
+                                            .iter()
+                                            .zip(thread_eval_data.iter_mut())
+                                            .map(|(input_lookup_evaluator, input_eval_data)| {
+                                                input_lookup_evaluator.evaluate(
+                                                    input_eval_data,
+                                                    fixed,
+                                                    advice,
+                                                    instance,
+                                                    challenges,
+                                                    &beta,
+                                                    &gamma,
+                                                    &theta,
+                                                    &y,
+                                                    &C::ScalarExt::ZERO,
+                                                    idx,
+                                                    rot_scale,
+                                                    isize,
+                                                )
+                                            })
+                                            .collect()
+                                    })
+                                    .collect();
+                                
+                                // Extend the main buffer with chunk results
+                                for inputs_values in chunk_results {
+                                    inputs_values_for_extended_domain.extend_from_slice(&inputs_values);
+                                }
+                            }
 
-                        inputs_values_for_extended_domain.extend_from_slice(&inputs_values);
-                    }
+                            // Batch inversion
+                            inputs_values_for_extended_domain.batch_invert();
 
-                    inputs_values_for_extended_domain.batch_invert();
+                            // Reshape results efficiently
+                            let inputs_inv_sums: Vec<Vec<_>> = inputs_values_for_extended_domain
+                                .chunks_exact(num_inputs)
+                                .map(|c| c.to_vec())
+                                .collect();
+                            
+                            (
+                                inputs_inv_sums,
+                                domain.coeff_to_extended(&lookup.phi_poly),
+                                domain.coeff_to_extended(&lookup.m_poly),
+                            )
+                        })
+                        .collect()
+                } else {
+                    log::info!("🔄 [STANDARD] Using standard lookup inverse sum computation");
+                    
+                    // ORIGINAL VERSION
+                    lookups
+                        .par_iter()
+                        .enumerate()
+                        .map(|(n, lookup)| {
+                            let (inputs_lookup_evaluator, _) = &self.lookups[n];
+                            let mut inputs_eval_data: Vec<_> = inputs_lookup_evaluator
+                                .iter()
+                                .map(|input_lookup_evaluator| input_lookup_evaluator.instance())
+                                .collect();
 
-                    // The outer vector has capacity domain.extended_len()
-                    // The inner vector has capacity self.lookups[n].0.len()
-                    let inputs_inv_sums: Vec<Vec<_>> = inputs_values_for_extended_domain
-                        .chunks_exact(self.lookups[n].0.len())
-                        .map(|c| c.to_vec())
-                        .collect();
+                            let mut inputs_values_for_extended_domain: Vec<C::Scalar> =
+                                Vec::with_capacity(self.lookups[n].0.len() * domain.extended_len());
+                            for idx in 0..domain.extended_len() {
+                                // For each compressed input column, evaluate at ω^i and add beta
+                                // This is a vector of length self.lookups[n].0.len()
+                                let inputs_values: Vec<C::ScalarExt> = inputs_lookup_evaluator
+                                    .par_iter()
+                                    .zip(inputs_eval_data.par_iter_mut())
+                                    .map(|(input_lookup_evaluator, input_eval_data)| {
+                                        input_lookup_evaluator.evaluate(
+                                            input_eval_data,
+                                            fixed,
+                                            advice,
+                                            instance,
+                                            challenges,
+                                            &beta,
+                                            &gamma,
+                                            &theta,
+                                            &y,
+                                            &C::ScalarExt::ZERO,
+                                            idx,
+                                            rot_scale,
+                                            isize,
+                                        )
+                                    })
+                                    .collect();
 
-                    (
-                        inputs_inv_sums,
-                        domain.coeff_to_extended(&lookup.phi_poly),
-                        domain.coeff_to_extended(&lookup.m_poly),
-                    )
-                })
-                .collect();
+                                inputs_values_for_extended_domain.extend_from_slice(&inputs_values);
+                            }
+
+                            inputs_values_for_extended_domain.batch_invert();
+
+                            // The outer vector has capacity domain.extended_len()
+                            // The inner vector has capacity self.lookups[n].0.len()
+                            let inputs_inv_sums: Vec<Vec<_>> = inputs_values_for_extended_domain
+                                .chunks_exact(self.lookups[n].0.len())
+                                .map(|c| c.to_vec())
+                                .collect();
+
+                            (
+                                inputs_inv_sums,
+                                domain.coeff_to_extended(&lookup.phi_poly),
+                                domain.coeff_to_extended(&lookup.m_poly),
+                            )
+                        })
+                        .collect()
+                }
+            };
             #[cfg(feature = "mv-lookup")]
-            log::trace!(" - Lookups inv sum: {:?}", start.elapsed());
+            log::info!(" - Lookups inv sum: {:?}", start.elapsed());
 
             #[cfg(feature = "mv-lookup")]
             let start = instant::Instant::now();
