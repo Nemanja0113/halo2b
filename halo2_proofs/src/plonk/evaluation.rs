@@ -10,11 +10,12 @@ use crate::plonk::lookup;
 
 use crate::poly::Basis;
 use crate::{
-    arithmetic::{parallelize, CurveAffine},
-    poly::{Coeff, ExtendedLagrangeCoeff, Polynomial, Rotation},
+    arithmetic::{eval_polynomial, parallelize, CurveAffine},
+    poly::{Coeff, ExtendedLagrangeCoeff, Polynomial, Rotation, EvaluationDomain},
 };
 
 use group::ff::{Field, PrimeField, WithSmallOrderMulGroup};
+use std::time::Instant as instant;
 #[cfg(feature = "mv-lookup")]
 use maybe_rayon::iter::IndexedParallelIterator;
 use maybe_rayon::iter::IntoParallelRefIterator;
