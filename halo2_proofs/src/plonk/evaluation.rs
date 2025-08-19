@@ -19,6 +19,7 @@ use group::ff::{Field, PrimeField, WithSmallOrderMulGroup};
 use maybe_rayon::iter::IndexedParallelIterator;
 use maybe_rayon::iter::IntoParallelRefIterator;
 use maybe_rayon::iter::ParallelIterator;
+use maybe_rayon::iter::ParallelExtend;
 
 use super::{shuffle, ConstraintSystem, Expression};
 
@@ -1035,7 +1036,7 @@ impl<C: CurveAffine> Evaluator<C> {
                             for (i, value) in values.iter_mut().enumerate() {
                                 let idx = start + i;
                                 let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
-                                let r_last = get_rotation_idx(idx, last_rotation.0, rot_scale, isize);
+                                let r_last = get_rotation_idx(idx, last_rotation.0, rot_scale, isize
 
                                 // Batch process permutation constraints
                                 let mut perm_value = C::ScalarExt::ZERO;
@@ -1173,12 +1174,12 @@ impl<C: CurveAffine> Evaluator<C> {
 
         // Convert back to coefficient form
         let final_start = instant::Instant::now();
-        let result = domain.extended_to_coeff(values);
+        let coeff_values = domain.extended_to_coeff(values);
         log::trace!(" - Batch Final conversion: {:?}", final_start.elapsed());
         
         log::info!("🚀 [BATCH] Total evaluate_h_batch time: {:?}", batch_start.elapsed());
         
-        result
+        Polynomial::new(coeff_values)
     }
 }
 
