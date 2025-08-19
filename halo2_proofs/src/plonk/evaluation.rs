@@ -844,9 +844,90 @@ impl<C: CurveAffine> Evaluator<C> {
             let start = instant::Instant::now();
             
             // Check environment variable for optimization
-            let use_optimized = std::env::var("HALO2_OPTIMIZE_LOOKUP_CONSTRAINTS").unwrap_or_default() == "1";
+            let use_standard = std::env::var("HALO2_OPTIMIZE_LOOKUP_CONSTRAINTS").unwrap_or_default() == "0";
             
-            if use_optimized {
+            if use_standard {
+                log::info!("🔄 [STANDARD] Using standard lookup constraints computation");
+                
+                // ORIGINAL VERSION
+                for (n, lookup) in lookups.iter().enumerate() {
+                    // Polynomials required for this lookup.
+                    // Calculated here so these only have to be kept in memory for the short time
+                    // they are actually needed.
+
+                    #[cfg(feature = "precompute-coset")]
+                    let (product_coset, permuted_input_coset, permuted_table_coset) = &cosets.remove(0);
+
+                    #[cfg(not(feature = "precompute-coset"))]
+                    let (product_coset, permuted_input_coset, permuted_table_coset) = {
+                        let product_coset = pk.vk.domain.coeff_to_extended(&lookup.product_poly);
+                        let permuted_input_coset =
+                            pk.vk.domain.coeff_to_extended(&lookup.permuted_input_poly);
+                        let permuted_table_coset =
+                            pk.vk.domain.coeff_to_extended(&lookup.permuted_table_poly);
+                        (product_coset, permuted_input_coset, permuted_table_coset)
+                    };
+
+                    // Lookup constraints
+                    parallelize(&mut values, |values, start| {
+                        let lookup_evaluator = &self.lookups[n];
+                        let mut eval_data = lookup_evaluator.instance();
+                        for (i, value) in values.iter_mut().enumerate() {
+                            let idx = start + i;
+
+                            let table_value = lookup_evaluator.evaluate(
+                                &mut eval_data,
+                                fixed,
+                                advice,
+                                instance,
+                                challenges,
+                                &beta,
+                                &gamma,
+                                &theta,
+                                &y,
+                                &C::ScalarExt::ZERO,
+                                idx,
+                                rot_scale,
+                                isize,
+                            );
+
+                            let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
+                            let r_prev = get_rotation_idx(idx, -1, rot_scale, isize);
+
+                            let a_minus_s = permuted_input_coset[idx] - permuted_table_coset[idx];
+                            // l_0(X) * (1 - z(X)) = 0
+                            *value = *value * y + ((one - product_coset[idx]) * l0[idx]);
+                            // l_last(X) * (z(X)^2 - z(X)) = 0
+                            *value = *value * y
+                                + ((product_coset[idx] * product_coset[idx] - product_coset[idx])
+                                    * l_last[idx]);
+                            // (1 - (l_last(X) + l_blind(X))) * (
+                            //   z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
+                            //   - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \beta)
+                            //          (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
+                            // ) = 0
+                            *value = *value * y
+                                + ((product_coset[r_next]
+                                    * (permuted_input_coset[idx] + beta)
+                                    * (permuted_table_coset[idx] + gamma)
+                                    - product_coset[idx] * table_value)
+                                    * l_active_row[idx]);
+                            // Check that the first values in the permuted input expression and permuted
+                            // fixed expression are the same.
+                            // l_0(X) * (a'(X) - s'(X)) = 0
+                            *value = *value * y + (a_minus_s * l0[idx]);
+                            // Check that each value in the permuted lookup input expression is either
+                            // equal to the value above it, or the value at the same index in the
+                            // permuted table expression.
+                            // (1 - (l_last + l_blind)) * (a′(X) − s′(X))⋅(a′(X) − a′(\omega^{-1} X)) = 0
+                            *value = *value * y
+                                + (a_minus_s
+                                    * (permuted_input_coset[idx] - permuted_input_coset[r_prev])
+                                    * l_active_row[idx]);
+                        }
+                    });
+                }
+            } else {
                 log::info!("🚀 [OPTIMIZED] Using optimized lookup constraints computation");
                 
                 // OPTIMIZED VERSION: Parallel coset conversion with sequential constraint application
@@ -921,83 +1002,6 @@ impl<C: CurveAffine> Evaluator<C> {
                 }
                 
                 log::debug!("    Total optimized lookup constraints: {:?}", eval_start.elapsed());
-            } else {
-                log::info!("🔄 [STANDARD] Using standard lookup constraints computation");
-                
-                // ORIGINAL VERSION
-                for (n, lookup) in lookups.iter().enumerate() {
-                    // Polynomials required for this lookup.
-                    // Calculated here so these only have to be kept in memory for the short time
-                    // they are actually needed.
-
-                    let (product_coset, permuted_input_coset, permuted_table_coset) = {
-                        let product_coset = pk.vk.domain.coeff_to_extended(&lookup.product_poly);
-                        let permuted_input_coset =
-                            pk.vk.domain.coeff_to_extended(&lookup.permuted_input_poly);
-                        let permuted_table_coset =
-                            pk.vk.domain.coeff_to_extended(&lookup.permuted_table_poly);
-                        (product_coset, permuted_input_coset, permuted_table_coset)
-                    };
-
-                    // Lookup constraints
-                    parallelize(&mut values, |values, start| {
-                        let lookup_evaluator = &self.lookups[n];
-                        let mut eval_data = lookup_evaluator.instance();
-                        for (i, value) in values.iter_mut().enumerate() {
-                            let idx = start + i;
-
-                            let table_value = lookup_evaluator.evaluate(
-                                &mut eval_data,
-                                fixed,
-                                advice,
-                                instance,
-                                challenges,
-                                &beta,
-                                &gamma,
-                                &theta,
-                                &y,
-                                &C::ScalarExt::ZERO,
-                                idx,
-                                rot_scale,
-                                isize,
-                            );
-
-                            let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
-                            let r_prev = get_rotation_idx(idx, -1, rot_scale, isize);
-
-                            let a_minus_s = permuted_input_coset[idx] - permuted_table_coset[idx];
-                            // l_0(X) * (1 - z(X)) = 0
-                            *value = *value * y + ((one - product_coset[idx]) * l0[idx]);
-                            // l_last(X) * (z(X)^2 - z(X)) = 0
-                            *value = *value * y
-                                + ((product_coset[idx] * product_coset[idx] - product_coset[idx])
-                                    * l_last[idx]);
-                            // (1 - (l_last(X) + l_blind(X))) * (
-                            //   z(\omega X) (a'(X) + \beta) (s'(X) + \gamma)
-                            //   - z(X) (\theta^{m-1} a_0(X) + ... + a_{m-1}(X) + \beta)
-                            //          (\theta^{m-1} s_0(X) + ... + s_{m-1}(X) + \gamma)
-                            // ) = 0
-                            *value = *value * y
-                                + ((product_coset[r_next]
-                                    * (permuted_input_coset[idx] + beta)
-                                    * (permuted_table_coset[idx] + gamma)
-                                    - product_coset[idx] * table_value)
-                                    * l_active_row[idx]);
-                            // Check that the first values in the permuted input expression and permuted
-                            // fixed expression are the same.
-                            // l_0(X) * (a'(X) - s'(X)) = 0
-                            *value = *value * y + (a_minus_s * l0[idx]);
-                            // Check that each value in the permuted lookup input expression is either
-                            // equal to the value above it, or the value at the same index in the
-                            // permuted table expression.
-                            // (1 - (l_last + l_blind)) * (a′(X) − s′(X))⋅(a′(X) − a′(\omega^{-1} X)) = 0
-                            *value = *value * y
-                                + (a_minus_s
-                                    * (permuted_input_coset[idx] - permuted_input_coset[r_prev])
-                                    * l_active_row[idx]);
-                        }
-                    });
-                }
             }
             log::info!(" - Lookups constraints: {:?}", start.elapsed());
 
