@@ -898,19 +898,19 @@ impl<C: CurveAffine> Evaluator<C> {
 
     /// Evaluate h poly with prover-level parallelization for multiple circuit instances
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::plonk) fn evaluate_h_batch(
+    pub(in crate::plonk) fn evaluate_h_batch<'a>(
         &self,
         pk: &ProvingKey<C>,
-        advice_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
-        instance_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
+        advice_polys: &'a [&'a [Polynomial<C::ScalarExt, Coeff>]],
+        instance_polys: &'a [&'a [Polynomial<C::ScalarExt, Coeff>]],
         challenges: &[C::ScalarExt],
         y: C::ScalarExt,
         beta: C::ScalarExt,
         gamma: C::ScalarExt,
         theta: C::ScalarExt,
-        lookups: &[Vec<lookup::prover::Committed<C>>],
-        shuffles: &[Vec<shuffle::prover::Committed<C>>],
-        permutations: &[permutation::prover::Committed<C>],
+        lookups: &'a [Vec<lookup::prover::Committed<C>>],
+        shuffles: &'a [Vec<shuffle::prover::Committed<C>>],
+        permutations: &'a [permutation::prover::Committed<C>],
     ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
         let domain = &pk.vk.domain;
         let batch_start = Instant::now();
@@ -993,19 +993,19 @@ impl<C: CurveAffine> Evaluator<C> {
     }
 
     /// Performance monitoring and adaptive optimization for batch processing
-    fn adaptive_batch_processing(
+    fn adaptive_batch_processing<'a>(
         &self,
         pk: &ProvingKey<C>,
-        advice_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
-        instance_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
+        advice_polys: &'a [&'a [Polynomial<C::ScalarExt, Coeff>]],
+        instance_polys: &'a [&'a [Polynomial<C::ScalarExt, Coeff>]],
         challenges: &[C::ScalarExt],
         y: C::ScalarExt,
         beta: C::ScalarExt,
         gamma: C::ScalarExt,
         theta: C::ScalarExt,
-        lookups: &[Vec<lookup::prover::Committed<C>>],
-        shuffles: &[Vec<shuffle::prover::Committed<C>>],
-        permutations: &[permutation::prover::Committed<C>],
+        lookups: &'a [Vec<lookup::prover::Committed<C>>],
+        shuffles: &'a [Vec<shuffle::prover::Committed<C>>],
+        permutations: &'a [permutation::prover::Committed<C>],
     ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
         let domain = &pk.vk.domain;
         let num_instances = advice_polys.len();
@@ -1075,19 +1075,19 @@ impl<C: CurveAffine> Evaluator<C> {
     }
 
     /// Adaptive batch processing with dynamic chunk sizing
-    fn batch_process_circuit_instances_adaptive(
+    fn batch_process_circuit_instances_adaptive<'a>(
         &self,
         pk: &ProvingKey<C>,
-        advice_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
-        instance_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
+        advice_polys: &'a [&'a [Polynomial<C::ScalarExt, Coeff>]],
+        instance_polys: &'a [&'a [Polynomial<C::ScalarExt, Coeff>]],
         challenges: &[C::ScalarExt],
         y: C::ScalarExt,
         beta: C::ScalarExt,
         gamma: C::ScalarExt,
         theta: C::ScalarExt,
-        lookups: &[Vec<lookup::prover::Committed<C>>],
-        shuffles: &[Vec<shuffle::prover::Committed<C>>],
-        permutations: &[permutation::prover::Committed<C>],
+        lookups: &'a [Vec<lookup::prover::Committed<C>>],
+        shuffles: &'a [Vec<shuffle::prover::Committed<C>>],
+        permutations: &'a [permutation::prover::Committed<C>],
         chunk_size: usize,
     ) -> Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> {
         let domain = &pk.vk.domain;
@@ -1120,18 +1120,18 @@ impl<C: CurveAffine> Evaluator<C> {
     }
 
     /// Prepare chunk data with memory optimization
-    fn prepare_chunk_data(
+    fn prepare_chunk_data<'a>(
         &self,
-        advice_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
-        instance_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
-        lookups: &[Vec<lookup::prover::Committed<C>>],
-        shuffles: &[Vec<shuffle::prover::Committed<C>>],
-        permutations: &[permutation::prover::Committed<C>],
+        advice_polys: &'a [&'a [Polynomial<C::ScalarExt, Coeff>]],
+        instance_polys: &'a [&'a [Polynomial<C::ScalarExt, Coeff>]],
+        lookups: &'a [Vec<lookup::prover::Committed<C>>],
+        shuffles: &'a [Vec<shuffle::prover::Committed<C>>],
+        permutations: &'a [permutation::prover::Committed<C>],
         start_idx: usize,
         chunk_len: usize,
     ) -> Vec<(
-        &[Polynomial<C::ScalarExt, Coeff>],
-        &[Polynomial<C::ScalarExt, Coeff>],
+        &'a [Polynomial<C::ScalarExt, Coeff>],
+        &'a [Polynomial<C::ScalarExt, Coeff>],
         Vec<lookup::prover::Committed<C>>,
         Vec<shuffle::prover::Committed<C>>,
         permutation::prover::Committed<C>,
@@ -1153,12 +1153,12 @@ impl<C: CurveAffine> Evaluator<C> {
     }
 
     /// Process chunk with performance monitoring
-    fn process_chunk_with_monitoring(
+    fn process_chunk_with_monitoring<'a>(
         &self,
         pk: &ProvingKey<C>,
         chunk_data: &[(
-            &[Polynomial<C::ScalarExt, Coeff>],
-            &[Polynomial<C::ScalarExt, Coeff>],
+            &'a [Polynomial<C::ScalarExt, Coeff>],
+            &'a [Polynomial<C::ScalarExt, Coeff>],
             Vec<lookup::prover::Committed<C>>,
             Vec<shuffle::prover::Committed<C>>,
             permutation::prover::Committed<C>,
@@ -1490,19 +1490,19 @@ impl<C: CurveAffine> Evaluator<C> {
     }
 
     /// Optimized batch processing for multiple circuit instances with shared infrastructure
-    fn batch_process_circuit_instances(
+    fn batch_process_circuit_instances<'a>(
         &self,
         pk: &ProvingKey<C>,
-        advice_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
-        instance_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
+        advice_polys: &'a [&'a [Polynomial<C::ScalarExt, Coeff>]],
+        instance_polys: &'a [&'a [Polynomial<C::ScalarExt, Coeff>]],
         challenges: &[C::ScalarExt],
         y: C::ScalarExt,
         beta: C::ScalarExt,
         gamma: C::ScalarExt,
         theta: C::ScalarExt,
-        lookups: &[Vec<lookup::prover::Committed<C>>],
-        shuffles: &[Vec<shuffle::prover::Committed<C>>],
-        permutations: &[permutation::prover::Committed<C>],
+        lookups: &'a [Vec<lookup::prover::Committed<C>>],
+        shuffles: &'a [Vec<shuffle::prover::Committed<C>>],
+        permutations: &'a [permutation::prover::Committed<C>],
     ) -> Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> {
         let domain = &pk.vk.domain;
         let num_instances = advice_polys.len();
