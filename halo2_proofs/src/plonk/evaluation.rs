@@ -1172,14 +1172,9 @@ impl<C: CurveAffine> Evaluator<C> {
         }
         log::trace!(" - Batch Lookups: {:?}", lookup_start.elapsed());
 
-        // Convert back to coefficient form
-        let final_start = instant::Instant::now();
-        let coeff_values = domain.extended_to_coeff(values);
-        log::trace!(" - Batch Final conversion: {:?}", final_start.elapsed());
-        
         log::info!("🚀 [BATCH] Total evaluate_h_batch time: {:?}", batch_start.elapsed());
         
-        Polynomial::new(coeff_values)
+        values
     }
 }
 
