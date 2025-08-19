@@ -1540,16 +1540,16 @@ impl<C: CurveAffine> Evaluator<C> {
                     permutations_chunk.push(permutations[idx].clone());
                 }
                 
-                scope.spawn(move |_| {
-                    // Process each instance in this chunk with optimized memory access
-                    for (local_idx, (advice, instance, lookup, shuffle, permutation)) in 
-                        advice_chunk.iter()
-                            .zip(instance_chunk.iter())
-                            .zip(lookups_chunk.iter())
-                            .zip(shuffles_chunk.iter())
-                            .zip(permutations_chunk.iter())
-                            .enumerate()
-                    {
+                                   scope.spawn(move |_| {
+                       // Process each instance in this chunk with optimized memory access
+                       for (local_idx, ((((advice, instance), lookup), shuffle), permutation)) in 
+                           advice_chunk.iter()
+                               .zip(instance_chunk.iter())
+                               .zip(lookups_chunk.iter())
+                               .zip(shuffles_chunk.iter())
+                               .zip(permutations_chunk.iter())
+                               .enumerate()
+                       {
                         // Evaluate this circuit instance independently
                         let instance_result = self.evaluate_h(
                             pk,
