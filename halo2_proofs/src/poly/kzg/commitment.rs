@@ -385,6 +385,31 @@ where
         best_multiexp(&scalars, &bases[0..size])
     }
 
+    /// Batch commit multiple polynomials in coefficient basis
+    fn commit_batch(
+        &self,
+        polynomials: &[&Polynomial<E::Fr, Coeff>],
+        _blinds: &[Blind<E::Fr>],
+    ) -> Vec<E::G1Affine> {
+        use crate::arithmetic::{BatchMSMInput, best_batch_multiexp};
+        
+        let mut batch_input = BatchMSMInput::new();
+        
+        // Add polynomials without blinding factors (matching non-batch behavior)
+        for poly in polynomials {
+            batch_input.add_polynomial(poly.values.as_slice(), E::Fr::ZERO); // Use zero as dummy blinding
+        }
+        
+        let bases = &self.g;
+        let results = best_batch_multiexp(&batch_input, bases);
+        
+        // Convert to affine points
+        let mut affine_results = vec![E::G1Affine::identity(); results.len()];
+        E::G1::batch_normalize(&results, &mut affine_results);
+        
+        affine_results
+    }
+
     fn get_g(&self) -> &[E::G1Affine] {
         &self.g
     }

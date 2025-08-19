@@ -209,6 +209,15 @@ where
             .reduce(|acc, poly| acc + &poly)
             .unwrap();
 
+        // OPTIMIZATION: Prepare for batch commitment
+        let mut batch_polynomials = Vec::new();
+        let mut batch_blinds = Vec::new();
+        
+        // Add first polynomial to batch
+        batch_polynomials.push(&h_x);
+        batch_blinds.push(Blind::default());
+
+        // Write first commitment to transcript immediately (needed for challenge generation)
         let h = self.params.commit(&h_x, Blind::default()).to_affine();
         transcript.write_point(h)?;
         let u: ChallengeU<_> = transcript.squeeze_challenge_scalar();
@@ -291,7 +300,21 @@ where
             _marker: PhantomData,
         };
 
-        let h = self.params.commit(&h_x, Blind::default()).to_affine();
+        // OPTIMIZATION: Use batch commitment for the second polynomial only
+        // Since we already committed the first polynomial individually above
+        let use_batch = std::env::var("HALO2_BATCH_MSM").unwrap_or_default() == "1";
+        
+        let h = if use_batch {
+            // Use batch MSM for better performance (single polynomial)
+            let batch_polynomials = vec![&h_x];
+            let batch_blinds = vec![Blind::default()];
+            self.params.commit_batch(&batch_polynomials, &batch_blinds)[0]
+        } else {
+            // Fallback to individual commitment
+            self.params.commit(&h_x, Blind::default()).to_affine()
+        };
+        
+        // Write second commitment to transcript
         transcript.write_point(h)?;
 
         Ok(())
