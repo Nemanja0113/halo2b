@@ -211,7 +211,7 @@ where
 
         // OPTIMIZATION: Prepare for batch commitment
         let mut batch_polynomials = Vec::new();
-        let mut batch_blinds = Vec::new();
+        let mut batch_blinds: Vec<Blind<E::Fr>> = Vec::new();
         
         // Add first polynomial to batch
         batch_polynomials.push(&h_x);
@@ -307,7 +307,7 @@ where
         let h = if use_batch {
             // Use batch MSM for better performance (single polynomial)
             let batch_polynomials = vec![&h_x];
-            let batch_blinds = vec![Blind::default()];
+            let batch_blinds: Vec<Blind<E::Fr>> = vec![Blind::default()];
             self.params.commit_batch(&batch_polynomials, &batch_blinds)[0]
         } else {
             // Fallback to individual commitment

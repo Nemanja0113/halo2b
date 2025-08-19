@@ -6,6 +6,7 @@ use super::{
 use crate::transcript::{EncodedChallenge, TranscriptRead, TranscriptWrite};
 use crate::{helpers::SerdePrimeField, poly::Error};
 use ff::Field;
+use group::Curve;
 use halo2curves::CurveAffine;
 use rand_core::RngCore;
 
