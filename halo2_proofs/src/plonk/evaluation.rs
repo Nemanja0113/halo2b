@@ -29,6 +29,8 @@ use ff::BatchInvert;
 #[cfg(feature = "mv-lookup")]
 use maybe_rayon::iter::IntoParallelRefMutIterator;
 
+use std::time::Instant;
+
 /// Return the index in the polynomial of size `isize` after rotation `rot`.
 fn get_rotation_idx(idx: usize, rot: i32, rot_scale: i32, isize: i32) -> usize {
     (((idx as i32) + (rot * rot_scale)).rem_euclid(isize)) as usize
@@ -894,7 +896,7 @@ impl<C: CurveAffine> Evaluator<C> {
         values
     }
 
-    /// Evaluate h poly with batch processing for multiple circuit instances
+    /// Evaluate h poly with prover-level parallelization for multiple circuit instances
     #[allow(clippy::too_many_arguments)]
     pub(in crate::plonk) fn evaluate_h_batch(
         &self,
@@ -910,276 +912,296 @@ impl<C: CurveAffine> Evaluator<C> {
         shuffles: &[Vec<shuffle::prover::Committed<C>>],
         permutations: &[permutation::prover::Committed<C>],
     ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
-        let start = instant::Instant::now();
         let domain = &pk.vk.domain;
-        let size = domain.extended_len();
-        let rot_scale = 1 << (domain.extended_k() - domain.k());
-        let fixed = &pk.fixed_cosets[..];
-        let extended_omega = domain.get_extended_omega();
-        let isize = size as i32;
-        let one = C::ScalarExt::ONE;
-        let l0 = &pk.l0;
-        let l_last = &pk.l_last;
-        let l_active_row = &pk.l_active_row;
-        let p = &pk.vk.cs.permutation;
-        log::trace!(" - Batch Initialization: {:?}", start.elapsed());
-
-        // Batch process all circuit instances together
-        let batch_start = instant::Instant::now();
+        let batch_start = Instant::now();
         
-        // Pre-compute all cosets in parallel for all instances using batch processing
-        let start = instant::Instant::now();
-        let advice_cosets: Vec<Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>> = advice_polys
-            .par_iter()
-            .map(|advice_polys| {
-                // Use batch conversion for better performance
-                let poly_refs: Vec<&Polynomial<C::Scalar, Coeff>> = advice_polys.iter().collect();
-                Self::batch_coeff_to_extended(domain, &poly_refs)
-            })
-            .collect();
-        log::trace!(" - Batch Advice cosets: {:?}", start.elapsed());
+        if advice_polys.is_empty() || instance_polys.is_empty() {
+            return domain.empty_extended();
+        }
+        
+        if advice_polys.len() == 1 {
+            return self.evaluate_h(
+                pk,
+                &[advice_polys[0]],
+                &[instance_polys[0]],
+                challenges,
+                y,
+                beta,
+                gamma,
+                theta,
+                &[lookups[0].clone()],
+                &[shuffles[0].clone()],
+                &[permutations[0].clone()],
+            );
+        }
+        
+        // Check if adaptive processing is enabled via environment variable
+        let use_adaptive = std::env::var("HALO2_ADAPTIVE_BATCH").unwrap_or_default() == "1";
+        
+        if use_adaptive {
+            log::info!("🚀 [ADAPTIVE_BATCH] Processing {} circuit instances with adaptive optimization", advice_polys.len());
+            
+            // Use adaptive batch processing for optimal performance
+            let result = self.adaptive_batch_processing(
+                pk,
+                advice_polys,
+                instance_polys,
+                challenges,
+                y,
+                beta,
+                gamma,
+                theta,
+                lookups,
+                shuffles,
+                permutations,
+            );
+            
+            log::info!("🚀 [ADAPTIVE_BATCH] Completed adaptive processing in {:?}", batch_start.elapsed());
+            
+            result
+        } else {
+            log::info!("🚀 [STANDARD_BATCH] Processing {} circuit instances with standard optimization", advice_polys.len());
+            
+            // Use standard batch processing
+            let instance_results = self.batch_process_circuit_instances(
+                pk,
+                advice_polys,
+                instance_polys,
+                challenges,
+                y,
+                beta,
+                gamma,
+                theta,
+                lookups,
+                shuffles,
+                permutations,
+            );
+            
+            // Combine results from all instances
+            let mut combined_result = domain.empty_extended();
+            
+            for instance_result in instance_results {
+                for (combined_val, instance_val) in combined_result.iter_mut().zip(instance_result.iter()) {
+                    *combined_val = *combined_val + *instance_val;
+                }
+            }
+            
+            log::info!("🚀 [STANDARD_BATCH] Completed standard processing in {:?}", batch_start.elapsed());
+            
+            combined_result
+        }
+    }
 
-        let start = instant::Instant::now();
-        let instance_cosets: Vec<Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>> = instance_polys
-            .par_iter()
-            .map(|instance_polys| {
-                // Use batch conversion for better performance
-                let poly_refs: Vec<&Polynomial<C::Scalar, Coeff>> = instance_polys.iter().collect();
-                Self::batch_coeff_to_extended(domain, &poly_refs)
-            })
-            .collect();
-        log::trace!(" - Batch Instance cosets: {:?}", start.elapsed());
-
-        // Initialize result polynomial
-        let mut values = domain.empty_extended();
-
-        // Batch process all instances together
-        let num_instances = advice_cosets.len();
+    /// Performance monitoring and adaptive optimization for batch processing
+    fn adaptive_batch_processing(
+        &self,
+        pk: &ProvingKey<C>,
+        advice_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
+        instance_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
+        challenges: &[C::ScalarExt],
+        y: C::ScalarExt,
+        beta: C::ScalarExt,
+        gamma: C::ScalarExt,
+        theta: C::ScalarExt,
+        lookups: &[Vec<lookup::prover::Committed<C>>],
+        shuffles: &[Vec<shuffle::prover::Committed<C>>],
+        permutations: &[permutation::prover::Committed<C>],
+    ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
+        let domain = &pk.vk.domain;
+        let num_instances = advice_polys.len();
+        
+        // Performance monitoring
+        let start_time = Instant::now();
+        
+        // Adaptive chunk size based on instance count and available cores
         let num_threads = multicore::current_num_threads();
+        let adaptive_chunk_size = self.calculate_adaptive_chunk_size(num_instances, num_threads);
         
-        // Use larger chunk sizes for better cache locality
-        let chunk_size = (size + num_threads - 1) / num_threads;
+        log::info!("🚀 [ADAPTIVE] Processing {} instances with {} threads, chunk size: {}", 
+                   num_instances, num_threads, adaptive_chunk_size);
         
+        let results = self.batch_process_circuit_instances_adaptive(
+            pk,
+            advice_polys,
+            instance_polys,
+            challenges,
+            y,
+            beta,
+            gamma,
+            theta,
+            lookups,
+            shuffles,
+            permutations,
+            adaptive_chunk_size,
+        );
+        
+        // Combine results with performance tracking
+        let combine_start = Instant::now();
+        let mut combined_result = domain.empty_extended();
+        
+        for instance_result in results {
+            for (combined_val, instance_val) in combined_result.iter_mut().zip(instance_result.iter()) {
+                *combined_val = *combined_val + *instance_val;
+            }
+        }
+        
+        let total_time = start_time.elapsed();
+        let combine_time = combine_start.elapsed();
+        
+        log::info!("🚀 [ADAPTIVE] Total time: {:?}, Combine time: {:?}, Throughput: {:.2} instances/sec", 
+                   total_time, combine_time, 
+                   num_instances as f64 / total_time.as_secs_f64());
+        
+        combined_result
+    }
+
+    /// Calculate optimal chunk size based on workload characteristics
+    fn calculate_adaptive_chunk_size(&self, num_instances: usize, num_threads: usize) -> usize {
+        // Base chunk size calculation
+        let base_chunk_size = std::cmp::max(1, num_instances / num_threads);
+        
+        // Adjust based on instance count for better load balancing
+        let adjusted_chunk_size = if num_instances < 100 {
+            // For small batches, use smaller chunks for better parallelism
+            std::cmp::max(1, base_chunk_size / 2)
+        } else if num_instances > 1000 {
+            // For large batches, use larger chunks to reduce overhead
+            std::cmp::min(base_chunk_size * 2, num_instances / 4)
+        } else {
+            base_chunk_size
+        };
+        
+        adjusted_chunk_size
+    }
+
+    /// Adaptive batch processing with dynamic chunk sizing
+    fn batch_process_circuit_instances_adaptive(
+        &self,
+        pk: &ProvingKey<C>,
+        advice_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
+        instance_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
+        challenges: &[C::ScalarExt],
+        y: C::ScalarExt,
+        beta: C::ScalarExt,
+        gamma: C::ScalarExt,
+        theta: C::ScalarExt,
+        lookups: &[Vec<lookup::prover::Committed<C>>],
+        shuffles: &[Vec<shuffle::prover::Committed<C>>],
+        permutations: &[permutation::prover::Committed<C>],
+        chunk_size: usize,
+    ) -> Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> {
+        let domain = &pk.vk.domain;
+        let num_instances = advice_polys.len();
+        
+        // Pre-allocate with optimized capacity
+        let mut results = self.optimize_memory_for_batch_processing(num_instances, domain);
+        
+        // Use adaptive chunking for better load distribution
         multicore::scope(|scope| {
-            for (thread_idx, values_chunk) in values.chunks_mut(chunk_size).enumerate() {
-                let start_idx = thread_idx * chunk_size;
-                let advice_cosets_ref = &advice_cosets;
-                let instance_cosets_ref = &instance_cosets;
-                let lookups_ref = &lookups;
-                let shuffles_ref = &shuffles;
-                let permutations_ref = &permutations;
+            for (chunk_idx, results_chunk) in results.chunks_mut(chunk_size).enumerate() {
+                let start_idx = chunk_idx * chunk_size;
+                let chunk_len = results_chunk.len();
+                
+                // Pre-allocate chunk data with capacity optimization
+                let mut chunk_data = self.prepare_chunk_data(
+                    advice_polys, instance_polys, lookups, shuffles, permutations,
+                    start_idx, chunk_len
+                );
+                
                 scope.spawn(move |_| {
-                    // Process all instances for this chunk
-                    for (instance_idx, ((((advice, instance), lookups), shuffles), permutation)) in advice_cosets_ref
-                        .iter()
-                        .zip(instance_cosets_ref.iter())
-                        .zip(lookups_ref.iter())
-                        .zip(shuffles_ref.iter())
-                        .zip(permutations_ref.iter())
-                        .enumerate()
-                    {
-                        let mut eval_data = self.custom_gates.instance();
-                        
-                        // Process each value in the chunk
-                        for (i, value) in values_chunk.iter_mut().enumerate() {
-                            let idx = start_idx + i;
-                            
-                            // Evaluate custom gates with batched data access
-                            let gate_result = self.custom_gates.evaluate(
-                                &mut eval_data,
-                                fixed,
-                                advice.as_slice(),
-                                instance.as_slice(),
-                                challenges,
-                                &beta,
-                                &gamma,
-                                &theta,
-                                &y,
-                                value,
-                                idx,
-                                rot_scale,
-                                isize,
-                            );
-                            
-                            // Accumulate results from all instances
-                            if instance_idx == 0 {
-                                *value = gate_result;
-                            } else {
-                                *value = *value + gate_result;
-                            }
-                        }
-                    }
+                    self.process_chunk_with_monitoring(
+                        pk, &chunk_data, challenges, y, beta, gamma, theta, results_chunk
+                    );
                 });
             }
         });
         
-        log::trace!(" - Batch Custom gates: {:?}", batch_start.elapsed());
+        results
+    }
 
-        // Batch process permutations
-        let perm_start = instant::Instant::now();
-        for (instance_idx, ((((advice, instance), lookups), shuffles), permutation)) in advice_cosets
-            .iter()
-            .zip(instance_cosets.iter())
-            .zip(lookups.iter())
-            .zip(shuffles.iter())
-            .zip(permutations.iter())
-            .enumerate()
+    /// Prepare chunk data with memory optimization
+    fn prepare_chunk_data(
+        &self,
+        advice_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
+        instance_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
+        lookups: &[Vec<lookup::prover::Committed<C>>],
+        shuffles: &[Vec<shuffle::prover::Committed<C>>],
+        permutations: &[permutation::prover::Committed<C>],
+        start_idx: usize,
+        chunk_len: usize,
+    ) -> Vec<(
+        &[Polynomial<C::ScalarExt, Coeff>],
+        &[Polynomial<C::ScalarExt, Coeff>],
+        Vec<lookup::prover::Committed<C>>,
+        Vec<shuffle::prover::Committed<C>>,
+        permutation::prover::Committed<C>,
+    )> {
+        let mut chunk_data = Vec::with_capacity(chunk_len);
+        
+        for i in 0..chunk_len {
+            let idx = start_idx + i;
+            chunk_data.push((
+                advice_polys[idx],
+                instance_polys[idx],
+                lookups[idx].clone(),
+                shuffles[idx].clone(),
+                permutations[idx].clone(),
+            ));
+        }
+        
+        chunk_data
+    }
+
+    /// Process chunk with performance monitoring
+    fn process_chunk_with_monitoring(
+        &self,
+        pk: &ProvingKey<C>,
+        chunk_data: &[(
+            &[Polynomial<C::ScalarExt, Coeff>],
+            &[Polynomial<C::ScalarExt, Coeff>],
+            Vec<lookup::prover::Committed<C>>,
+            Vec<shuffle::prover::Committed<C>>,
+            permutation::prover::Committed<C>,
+        )],
+        challenges: &[C::ScalarExt],
+        y: C::ScalarExt,
+        beta: C::ScalarExt,
+        gamma: C::ScalarExt,
+        theta: C::ScalarExt,
+        results: &mut [Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>],
+    ) {
+        let chunk_start = Instant::now();
+        
+        for (local_idx, (advice, instance, lookup, shuffle, permutation)) in 
+            chunk_data.iter().enumerate()
         {
-            let sets = &permutation.sets;
-            if !sets.is_empty() {
-                let blinding_factors = pk.vk.cs.blinding_factors();
-                let last_rotation = Rotation(-((blinding_factors + 1) as i32));
-                let chunk_len = pk.vk.cs.degree() - 2;
-                let delta_start = beta * &C::Scalar::ZETA;
-
-                let first_set = sets.first().unwrap();
-                let last_set = sets.last().unwrap();
-
-                                        // Batch permutation constraints
-                parallelize(&mut values, |values, start| {
-                    let mut beta_term = extended_omega.pow_vartime([start as u64, 0, 0, 0]);
-                    for (i, value) in values.iter_mut().enumerate() {
-                        let idx = start + i;
-                        let r_next = get_rotation_idx(idx, 1, rot_scale, isize);
-                        let r_last = get_rotation_idx(idx, last_rotation.0, rot_scale, isize);
-
-                        // Batch process permutation constraints
-                        let mut perm_value = C::ScalarExt::ZERO;
-                        
-                        // First set constraints
-                        perm_value = perm_value * y
-                            + ((one - first_set.permutation_product_coset[idx]) * l0[idx]);
-                        
-                        // Last set constraints  
-                        perm_value = perm_value * y
-                            + ((last_set.permutation_product_coset[idx]
-                                * last_set.permutation_product_coset[idx]
-                                - last_set.permutation_product_coset[idx])
-                                * l_last[idx]);
-                        
-                        // Middle set constraints
-                        for (set_idx, set) in sets.iter().enumerate() {
-                            if set_idx != 0 {
-                                perm_value = perm_value * y
-                                    + ((set.permutation_product_coset[idx]
-                                        - permutation.sets[set_idx - 1].permutation_product_coset
-                                            [r_last])
-                                        * l0[idx]);
-                            }
-                        }
-                        
-                        // Product constraints
-                        let mut current_delta = delta_start * beta_term;
-                        for ((set, columns), cosets) in sets
-                            .iter()
-                            .zip(p.columns.chunks(chunk_len))
-                            .zip(pk.permutation.cosets.chunks(chunk_len))
-                        {
-                            let mut left = set.permutation_product_coset[r_next];
-                            for (values, permutation) in columns
-                                .iter()
-                                .map(|&column| match column.column_type() {
-                                    Any::Advice(_) => &advice.as_slice()[column.index()],
-                                    Any::Fixed => &fixed[column.index()],
-                                    Any::Instance => &instance.as_slice()[column.index()],
-                                })
-                                .zip(cosets.iter())
-                            {
-                                left *= values[idx] + beta * permutation[idx] + gamma;
-                            }
-
-                            let mut right = set.permutation_product_coset[idx];
-                            for values in columns.iter().map(|&column| match column.column_type() {
-                                Any::Advice(_) => &advice.as_slice()[column.index()],
-                                Any::Fixed => &fixed[column.index()],
-                                Any::Instance => &instance.as_slice()[column.index()],
-                            }) {
-                                right *= values[idx] + current_delta + gamma;
-                                current_delta *= &C::Scalar::DELTA;
-                            }
-
-                            perm_value = perm_value * y + ((left - right) * l_active_row[idx]);
-                        }
-                        
-                        // Accumulate permutation results
-                        if instance_idx == 0 {
-                            *value = *value + perm_value;
-                        } else {
-                            *value = *value + perm_value;
-                        }
-                        
-                        beta_term *= &extended_omega;
-                    }
-                });
+            let instance_start = Instant::now();
+            
+            let instance_result = self.evaluate_h(
+                pk,
+                &[advice],
+                &[instance],
+                challenges,
+                y,
+                beta,
+                gamma,
+                theta,
+                &[lookup.clone()],
+                &[shuffle.clone()],
+                &[permutation.clone()],
+            );
+            
+            results[local_idx] = instance_result;
+            
+            // Log performance for individual instances if needed
+            if local_idx % 10 == 0 {
+                log::debug!("🚀 [CHUNK] Instance {} processed in {:?}", 
+                           local_idx, instance_start.elapsed());
             }
         }
-        log::trace!(" - Batch Permutations: {:?}", perm_start.elapsed());
-
-        // Batch process lookups
-        let lookup_start = instant::Instant::now();
-        for (instance_idx, ((((advice, instance), lookups), shuffles), permutation)) in advice_cosets
-            .iter()
-            .zip(instance_cosets.iter())
-            .zip(lookups.iter())
-            .zip(shuffles.iter())
-            .zip(permutations.iter())
-            .enumerate()
-        {
-            // Process lookups in batch
-            #[cfg(feature = "mv-lookup")]
-            let inputs_inv_sum_cosets: Vec<_> = lookups
-                .par_iter()
-                .enumerate()
-                .map(|(n, lookup)| {
-                    let (inputs_lookup_evaluator, _) = &self.lookups[n];
-                    let mut inputs_eval_data: Vec<_> = inputs_lookup_evaluator
-                        .iter()
-                        .map(|input_lookup_evaluator| input_lookup_evaluator.instance())
-                        .collect();
-
-                    let mut inputs_values_for_extended_domain: Vec<C::Scalar> =
-                        Vec::with_capacity(self.lookups[n].0.len() * domain.extended_len());
-                    
-                    // Batch process all indices together
-                    for idx in 0..domain.extended_len() {
-                        let inputs_values: Vec<C::ScalarExt> = inputs_lookup_evaluator
-                            .par_iter()
-                            .zip(inputs_eval_data.par_iter_mut())
-                            .map(|(input_lookup_evaluator, input_eval_data)| {
-                                input_lookup_evaluator.evaluate(
-                                    input_eval_data,
-                                    fixed,
-                                    advice.as_slice(),
-                                    instance.as_slice(),
-                                    challenges,
-                                    &beta,
-                                    &gamma,
-                                    &theta,
-                                    &y,
-                                    &C::ScalarExt::ZERO,
-                                    idx,
-                                    rot_scale,
-                                    isize,
-                                )
-                            })
-                            .collect();
-
-                        inputs_values_for_extended_domain.extend_from_slice(&inputs_values);
-                    }
-
-                    inputs_values_for_extended_domain.batch_invert();
-                    
-                    // Continue with existing lookup processing...
-                    // (rest of lookup processing code would go here)
-                    inputs_values_for_extended_domain
-                })
-                .collect();
-        }
-        log::trace!(" - Batch Lookups: {:?}", lookup_start.elapsed());
-
-        log::info!("🚀 [BATCH] Total evaluate_h_batch time: {:?}", batch_start.elapsed());
         
-        values
+        log::debug!("🚀 [CHUNK] Processed {} instances in {:?}", 
+                   chunk_data.len(), chunk_start.elapsed());
     }
 }
 
@@ -1408,6 +1430,7 @@ impl<C: CurveAffine> GraphEvaluator<C> {
 }
 
 impl<C: CurveAffine> Evaluator<C> {
+    /// Batch convert multiple polynomials from coefficient to extended Lagrange form
     /// This is more efficient than converting them individually
     fn batch_coeff_to_extended(
         domain: &EvaluationDomain<C::Scalar>,
@@ -1461,6 +1484,131 @@ impl<C: CurveAffine> Evaluator<C> {
                     results[poly_idx][point_idx] = eval_polynomial(poly, point);
                 }
             }
+        }
+        
+        results
+    }
+
+    /// Optimized batch processing for multiple circuit instances with shared infrastructure
+    fn batch_process_circuit_instances(
+        &self,
+        pk: &ProvingKey<C>,
+        advice_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
+        instance_polys: &[&[Polynomial<C::ScalarExt, Coeff>]],
+        challenges: &[C::ScalarExt],
+        y: C::ScalarExt,
+        beta: C::ScalarExt,
+        gamma: C::ScalarExt,
+        theta: C::ScalarExt,
+        lookups: &[Vec<lookup::prover::Committed<C>>],
+        shuffles: &[Vec<shuffle::prover::Committed<C>>],
+        permutations: &[permutation::prover::Committed<C>],
+    ) -> Vec<Polynomial<C::ScalarExt, ExtendedLagrangeCoeff>> {
+        let domain = &pk.vk.domain;
+        let num_instances = advice_polys.len();
+        
+        // Pre-allocate results with capacity optimization
+        let mut results = Vec::with_capacity(num_instances);
+        for _ in 0..num_instances {
+            results.push(domain.empty_extended());
+        }
+        
+        // Optimize thread allocation based on available cores and workload
+        let num_threads = multicore::current_num_threads();
+        let optimal_chunk_size = std::cmp::max(1, num_instances / num_threads);
+        
+        // Use scoped threads for better memory management
+        multicore::scope(|scope| {
+            for (chunk_idx, results_chunk) in results.chunks_mut(optimal_chunk_size).enumerate() {
+                let start_idx = chunk_idx * optimal_chunk_size;
+                let chunk_len = results_chunk.len();
+                
+                // Pre-allocate chunk data to avoid repeated allocations
+                let mut advice_chunk = Vec::with_capacity(chunk_len);
+                let mut instance_chunk = Vec::with_capacity(chunk_len);
+                let mut lookups_chunk = Vec::with_capacity(chunk_len);
+                let mut shuffles_chunk = Vec::with_capacity(chunk_len);
+                let mut permutations_chunk = Vec::with_capacity(chunk_len);
+                
+                // Fill chunk data
+                for i in 0..chunk_len {
+                    let idx = start_idx + i;
+                    advice_chunk.push(advice_polys[idx]);
+                    instance_chunk.push(instance_polys[idx]);
+                    lookups_chunk.push(lookups[idx].clone());
+                    shuffles_chunk.push(shuffles[idx].clone());
+                    permutations_chunk.push(permutations[idx].clone());
+                }
+                
+                scope.spawn(move |_| {
+                    // Process each instance in this chunk with optimized memory access
+                    for (local_idx, (advice, instance, lookup, shuffle, permutation)) in 
+                        advice_chunk.iter()
+                            .zip(instance_chunk.iter())
+                            .zip(lookups_chunk.iter())
+                            .zip(shuffles_chunk.iter())
+                            .zip(permutations_chunk.iter())
+                            .enumerate()
+                    {
+                        // Evaluate this circuit instance independently
+                        let instance_result = self.evaluate_h(
+                            pk,
+                            &[advice],
+                            &[instance],
+                            challenges,
+                            y,
+                            beta,
+                            gamma,
+                            theta,
+                            &[lookup.clone()],
+                            &[shuffle.clone()],
+                            &[permutation.clone()],
+                        );
+                        
+                        results_chunk[local_idx] = instance_result;
+                    }
+                });
+            }
+        });
+        
+        results
+    }
+
+    /// Batch convert polynomials with memory pooling for better performance
+    fn batch_convert_polynomials_with_pooling(
+        domain: &EvaluationDomain<C::Scalar>,
+        polynomials: &[&Polynomial<C::Scalar, Coeff>],
+    ) -> Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>> {
+        let batch_size = polynomials.len();
+        if batch_size == 0 {
+            return Vec::new();
+        }
+        
+        // Pre-allocate result vector with exact capacity
+        let mut results = Vec::with_capacity(batch_size);
+        
+        // Use parallel processing with work-stealing for better load balancing
+        results.par_extend(
+            polynomials
+                .par_iter()
+                .map(|poly| domain.coeff_to_extended(poly))
+        );
+        
+        results
+    }
+
+    /// Optimized memory management for large batch operations
+    fn optimize_memory_for_batch_processing(
+        &self,
+        num_instances: usize,
+        domain: &EvaluationDomain<C::Scalar>,
+    ) -> Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>> {
+        // Pre-allocate with capacity hints for better memory layout
+        let mut results = Vec::with_capacity(num_instances);
+        
+        // Use bulk allocation to reduce memory fragmentation
+        for _ in 0..num_instances {
+            results.push(domain.empty_extended());
         }
         
         results
