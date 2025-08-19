@@ -436,93 +436,35 @@ impl<C: CurveAffine> Evaluator<C> {
             .zip(permutations.iter())
         {
             // Custom gates
-            let start = instant::Instant::now();
-            
-            // Check environment variable for optimization
-            let use_optimized = std::env::var("HALO2_OPTIMIZE_CUSTOM_GATES").unwrap_or_default() == "1";
-            
-            if use_optimized {
-                log::info!("🚀 [OPTIMIZED] Using optimized custom gates computation");
-                
-                // OPTIMIZED VERSION: Pre-compute rotation indices and reduce memory access overhead
-                let eval_start = instant::Instant::now();
-                
-                // Pre-compute all rotation indices for all threads to avoid repeated calculations
-                let rotation_indices: Vec<Vec<usize>> = (0..size)
-                    .map(|idx| {
-                        self.custom_gates.rotations
-                            .iter()
-                            .map(|&rot| get_rotation_idx(idx, rot, rot_scale, isize))
-                            .collect()
-                    })
-                    .collect();
-                
-                // Use rayon for better parallel processing with work-stealing
-                use maybe_rayon::prelude::*;
-                
-                values.par_iter_mut().enumerate().for_each(|(idx, value)| {
-                    // Use pre-computed rotation indices
-                    let rotations = &rotation_indices[idx];
-                    
-                    // Create evaluation data for this thread
-                    let mut eval_data = self.custom_gates.instance();
-                    
-                    // Copy pre-computed rotation indices to avoid repeated calculations
-                    eval_data.rotations.copy_from_slice(rotations);
-                    
-                    // Evaluate with optimized data access
-                    *value = self.custom_gates.evaluate(
-                        &mut eval_data,
-                        fixed,
-                        advice,
-                        instance,
-                        challenges,
-                        &beta,
-                        &gamma,
-                        &theta,
-                        &y,
-                        value,
-                        idx,
-                        rot_scale,
-                        isize,
-                    );
-                });
-                
-                log::debug!("    Total custom gates evaluation time: {:?}", eval_start.elapsed());
-            } else {
-                log::info!("🔄 [STANDARD] Using standard custom gates computation");
-                
-                // ORIGINAL VERSION
-                multicore::scope(|scope| {
-                    let chunk_size = (size + num_threads - 1) / num_threads;
-                    for (thread_idx, values) in values.chunks_mut(chunk_size).enumerate() {
-                        let start = thread_idx * chunk_size;
-                        scope.spawn(move |_| {
-                            let mut eval_data = self.custom_gates.instance();
-                            for (i, value) in values.iter_mut().enumerate() {
-                                let idx = start + i;
-                                *value = self.custom_gates.evaluate(
-                                    &mut eval_data,
-                                    fixed,
-                                    advice,
-                                    instance,
-                                    challenges,
-                                    &beta,
-                                    &gamma,
-                                    &theta,
-                                    &y,
-                                    value,
-                                    idx,
-                                    rot_scale,
-                                    isize,
-                                );
-                            }
-                        });
-                    }
-                });
-            }
-            
-            log::info!(" - Custom gates: {:?}", start.elapsed());
+
+            multicore::scope(|scope| {
+                let chunk_size = (size + num_threads - 1) / num_threads;
+                for (thread_idx, values) in values.chunks_mut(chunk_size).enumerate() {
+                    let start = thread_idx * chunk_size;
+                    scope.spawn(move |_| {
+                        let mut eval_data = self.custom_gates.instance();
+                        for (i, value) in values.iter_mut().enumerate() {
+                            let idx = start + i;
+                            *value = self.custom_gates.evaluate(
+                                &mut eval_data,
+                                fixed,
+                                advice,
+                                instance,
+                                challenges,
+                                &beta,
+                                &gamma,
+                                &theta,
+                                &y,
+                                value,
+                                idx,
+                                rot_scale,
+                                isize,
+                            );
+                        }
+                    });
+                }
+            });
+            log::trace!(" - Custom gates: {:?}", start.elapsed());
 
             // Permutations
             let start = instant::Instant::now();
