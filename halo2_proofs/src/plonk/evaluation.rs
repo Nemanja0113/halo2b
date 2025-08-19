@@ -963,14 +963,19 @@ impl<C: CurveAffine> Evaluator<C> {
         multicore::scope(|scope| {
             for (thread_idx, values_chunk) in values.chunks_mut(chunk_size).enumerate() {
                 let start_idx = thread_idx * chunk_size;
+                let advice_cosets_ref = &advice_cosets;
+                let instance_cosets_ref = &instance_cosets;
+                let lookups_ref = &lookups;
+                let shuffles_ref = &shuffles;
+                let permutations_ref = &permutations;
                 scope.spawn(move |_| {
                     // Process all instances for this chunk
-                    for (instance_idx, ((((advice, instance), lookups), shuffles), permutation)) in advice_cosets
+                    for (instance_idx, ((((advice, instance), lookups), shuffles), permutation)) in advice_cosets_ref
                         .iter()
-                        .zip(instance_cosets.iter())
-                        .zip(lookups.iter())
-                        .zip(shuffles.iter())
-                        .zip(permutations.iter())
+                        .zip(instance_cosets_ref.iter())
+                        .zip(lookups_ref.iter())
+                        .zip(shuffles_ref.iter())
+                        .zip(permutations_ref.iter())
                         .enumerate()
                     {
                         let mut eval_data = self.custom_gates.instance();
