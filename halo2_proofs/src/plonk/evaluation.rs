@@ -15,7 +15,6 @@ use crate::{
 };
 
 use group::ff::{Field, PrimeField, WithSmallOrderMulGroup};
-use std::time::Instant as instant;
 #[cfg(feature = "mv-lookup")]
 use maybe_rayon::iter::IndexedParallelIterator;
 use maybe_rayon::iter::IntoParallelRefIterator;
