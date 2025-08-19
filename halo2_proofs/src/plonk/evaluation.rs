@@ -560,12 +560,17 @@ impl<C: CurveAffine> Evaluator<C> {
             let inputs_inv_sum_cosets: Vec<_> = {
                 // Check environment variable for optimization
                 let use_optimized = std::env::var("HALO2_OPTIMIZE_LOOKUP_INV").unwrap_or_default() == "1";
+                let chunk_size = std::env::var("HALO2_LOOKUP_CHUNK_SIZE")
+                    .unwrap_or_default()
+                    .parse::<usize>()
+                    .unwrap_or(10000);
                 
                 if use_optimized {
                     log::info!("🚀 [OPTIMIZED] Using optimized lookup inverse sum computation");
                     
-                    // OPTIMIZED VERSION: Improved memory allocation and reduced nested parallelization
-                    lookups
+                    // AGGRESSIVE OPTIMIZATION: Single-level parallelization with pre-allocated buffers
+                    let eval_start = instant::Instant::now();
+                    let results = lookups
                         .par_iter()
                         .enumerate()
                         .map(|(n, lookup)| {
@@ -573,68 +578,55 @@ impl<C: CurveAffine> Evaluator<C> {
                             let num_inputs = inputs_lookup_evaluator.len();
                             let extended_len = domain.extended_len();
                             
-                            // Pre-allocate evaluation data once
-                            let mut inputs_eval_data: Vec<_> = inputs_lookup_evaluator
-                                .iter()
-                                .map(|input_lookup_evaluator| input_lookup_evaluator.instance())
-                                .collect();
-
                             // Pre-allocate the entire buffer with exact capacity
                             let mut inputs_values_for_extended_domain: Vec<C::Scalar> =
                                 Vec::with_capacity(num_inputs * extended_len);
                             
-                            // Process domain points in chunks to reduce memory pressure
-                            let chunk_size = 10000; // Process 10k points at a time
-                            for chunk_start in (0..extended_len).step_by(chunk_size) {
-                                let chunk_end = std::cmp::min(chunk_start + chunk_size, extended_len);
-                                
-                                // Pre-allocate chunk results
-                                let mut chunk_results: Vec<Vec<C::ScalarExt>> = Vec::with_capacity(chunk_end - chunk_start);
-                                
-                                // Process this chunk in parallel
-                                let chunk_indices: Vec<usize> = (chunk_start..chunk_end).collect();
-                                chunk_results = chunk_indices
-                                    .par_iter()
-                                    .map(|&idx| {
-                                        // Create a fresh evaluation data for this thread to avoid borrow issues
-                                        let mut thread_eval_data: Vec<_> = inputs_lookup_evaluator
-                                            .iter()
-                                            .map(|input_lookup_evaluator| input_lookup_evaluator.instance())
-                                            .collect();
-                                        
-                                        // Evaluate all input expressions for this domain point
-                                        inputs_lookup_evaluator
-                                            .iter()
-                                            .zip(thread_eval_data.iter_mut())
-                                            .map(|(input_lookup_evaluator, input_eval_data)| {
-                                                input_lookup_evaluator.evaluate(
-                                                    input_eval_data,
-                                                    fixed,
-                                                    advice,
-                                                    instance,
-                                                    challenges,
-                                                    &beta,
-                                                    &gamma,
-                                                    &theta,
-                                                    &y,
-                                                    &C::ScalarExt::ZERO,
-                                                    idx,
-                                                    rot_scale,
-                                                    isize,
-                                                )
-                                            })
-                                            .collect()
-                                    })
-                                    .collect();
-                                
-                                // Extend the main buffer with chunk results
-                                for inputs_values in chunk_results {
-                                    inputs_values_for_extended_domain.extend_from_slice(&inputs_values);
-                                }
+                            // Process all domain points in a single parallel iteration
+                            let domain_results: Vec<Vec<C::ScalarExt>> = (0..extended_len)
+                                .par_iter()
+                                .map(|&idx| {
+                                    // Create evaluation data for this thread (avoid borrow issues)
+                                    // Pre-allocate with known size to reduce allocations
+                                    let mut eval_data: Vec<_> = Vec::with_capacity(inputs_lookup_evaluator.len());
+                                    for input_lookup_evaluator in inputs_lookup_evaluator.iter() {
+                                        eval_data.push(input_lookup_evaluator.instance());
+                                    }
+                                    
+                                    // Evaluate all input expressions for this domain point
+                                    inputs_lookup_evaluator
+                                        .iter()
+                                        .zip(eval_data.iter_mut())
+                                        .map(|(input_lookup_evaluator, input_eval_data)| {
+                                            input_lookup_evaluator.evaluate(
+                                                input_eval_data,
+                                                fixed,
+                                                advice,
+                                                instance,
+                                                challenges,
+                                                &beta,
+                                                &gamma,
+                                                &theta,
+                                                &y,
+                                                &C::ScalarExt::ZERO,
+                                                idx,
+                                                rot_scale,
+                                                isize,
+                                            )
+                                        })
+                                        .collect()
+                                })
+                                .collect();
+                            
+                            // Flatten results efficiently - no additional allocations
+                            for inputs_values in domain_results {
+                                inputs_values_for_extended_domain.extend_from_slice(&inputs_values);
                             }
 
                             // Batch inversion
+                            let invert_start = instant::Instant::now();
                             inputs_values_for_extended_domain.batch_invert();
+                            log::debug!("    Batch inversion for lookup {}: {:?}", n, invert_start.elapsed());
 
                             // Reshape results efficiently
                             let inputs_inv_sums: Vec<Vec<_>> = inputs_values_for_extended_domain
@@ -648,7 +640,10 @@ impl<C: CurveAffine> Evaluator<C> {
                                 domain.coeff_to_extended(&lookup.m_poly),
                             )
                         })
-                        .collect()
+                        .collect();
+                    
+                    log::debug!("    Total evaluation time: {:?}", eval_start.elapsed());
+                    results
                 } else {
                     log::info!("🔄 [STANDARD] Using standard lookup inverse sum computation");
                     
