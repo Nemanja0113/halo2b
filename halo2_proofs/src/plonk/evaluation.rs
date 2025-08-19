@@ -851,6 +851,7 @@ impl<C: CurveAffine> Evaluator<C> {
                 // OPTIMIZED VERSION: Parallel coset conversion with sequential constraint application
                 let eval_start = instant::Instant::now();
                 
+                #[cfg(not(feature = "precompute-coset"))]
                 // 1. BATCH POLYNOMIAL CONVERSION: Convert all polynomials upfront in parallel
                 let lookup_cosets: Vec<_> = lookups
                     .par_iter()
