@@ -391,23 +391,12 @@ where
         polynomials: &[&Polynomial<E::Fr, Coeff>],
         _blinds: &[Blind<E::Fr>],
     ) -> Vec<E::G1Affine> {
-        use crate::arithmetic::{BatchMSMInput, best_batch_multiexp};
-        
-        let mut batch_input = BatchMSMInput::new();
-        
-        // Add polynomials without blinding factors (matching non-batch behavior)
-        for poly in polynomials {
-            batch_input.add_polynomial(poly.values.as_slice(), E::Fr::ZERO); // Use zero as dummy blinding
-        }
-        
-        let bases = &self.g;
-        let results = best_batch_multiexp(&batch_input, bases);
-        
-        // Convert to affine points
-        let mut affine_results = vec![E::G1Affine::identity(); results.len()];
-        E::G1::batch_normalize(&results, &mut affine_results);
-        
-        affine_results
+        // For now, fall back to individual commitments to avoid size mismatch issues
+        // TODO: Implement proper batch MSM when polynomial sizes are uniform
+        polynomials
+            .iter()
+            .map(|poly| self.commit(poly, Blind::default()).to_affine())
+            .collect()
     }
 
     fn get_g(&self) -> &[E::G1Affine] {
