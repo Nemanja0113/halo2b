@@ -18,6 +18,7 @@ use group::ff::{Field, PrimeField, WithSmallOrderMulGroup};
 #[cfg(feature = "mv-lookup")]
 use maybe_rayon::iter::IndexedParallelIterator;
 use maybe_rayon::iter::IntoParallelRefIterator;
+use maybe_rayon::iter::IntoParallelIterator;
 use maybe_rayon::iter::ParallelIterator;
 
 use super::{shuffle, ConstraintSystem, Expression};
@@ -584,8 +585,8 @@ impl<C: CurveAffine> Evaluator<C> {
                             
                             // Process all domain points in a single parallel iteration
                             let domain_results: Vec<Vec<C::ScalarExt>> = (0..extended_len)
-                                .par_iter()
-                                .map(|&idx| {
+                                .into_par_iter()
+                                .map(|idx| {
                                     // Create evaluation data for this thread (avoid borrow issues)
                                     // Pre-allocate with known size to reduce allocations
                                     let mut eval_data: Vec<_> = Vec::with_capacity(inputs_lookup_evaluator.len());
