@@ -842,10 +842,8 @@ impl<C: CurveAffine> Evaluator<C> {
             #[cfg(not(feature = "mv-lookup"))]
             // Lookups
             let start = instant::Instant::now();
-            
             // Check environment variable for optimization
             let use_standard = std::env::var("HALO2_OPTIMIZE_LOOKUP_CONSTRAINTS").unwrap_or_default() == "0";
-            
             if use_standard {
                 log::info!("🔄 [STANDARD] Using standard lookup constraints computation");
                 
