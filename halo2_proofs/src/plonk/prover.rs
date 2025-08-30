@@ -96,12 +96,12 @@ where
     }
 
     // Phase 1: Initialization and Validation
-    let phase1_start = Instant::now();
+    // let phase1_start = Instant::now();
     
     // Hash verification key into transcript
     pk.vk.hash_into(transcript)?;
     
-    log::info!("🔄 [PHASE 1] Initialization and Validation: {:?}", phase1_start.elapsed());
+    // log::info!("🔄 [PHASE 1] Initialization and Validation: {:?}", phase1_start.elapsed());
 
     let domain = &pk.vk.domain;
     let mut meta = ConstraintSystem::default();
@@ -120,7 +120,7 @@ where
     }
 
     // Phase 2: Instance Preparation
-    let phase2_start = Instant::now();
+    // let phase2_start = Instant::now();
     let instance: Vec<InstanceSingle<Scheme::Curve>> = instances
         .iter()
         .map(|instance| -> Result<InstanceSingle<Scheme::Curve>, Error> {
@@ -175,7 +175,7 @@ where
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
-    log::info!("🔄 [PHASE 2] Instance Preparation: {:?}", phase2_start.elapsed());
+    // log::info!("🔄 [PHASE 2] Instance Preparation: {:?}", phase2_start.elapsed());
 
     #[derive(Clone)]
     struct AdviceSingle<C: CurveAffine, B: Basis> {
@@ -329,7 +329,7 @@ where
     }
 
     // Phase 3: Witness Collection and Advice Preparation
-    let phase3_start = Instant::now();
+    // let phase3_start = Instant::now();
     let (advice, challenges) = {
         let mut advice = vec![
             AdviceSingle::<Scheme::Curve, LagrangeCoeff> {
@@ -344,7 +344,7 @@ where
 
         let unusable_rows_start = params.n() as usize - (meta.blinding_factors() + 1);
         for current_phase in pk.vk.cs.phases() {
-            let phase_sub_start = Instant::now();
+            // let phase_sub_start = Instant::now();
             let column_indices = meta
                 .advice_column_phase
                 .iter()
@@ -361,7 +361,7 @@ where
             for ((circuit, advice), instances) in
                 circuits.iter().zip(advice.iter_mut()).zip(instances)
             {
-                let circuit_start = Instant::now();
+                // let circuit_start = Instant::now();
                 let mut witness = WitnessCollection {
                     k: params.k(),
                     current_phase,
@@ -377,12 +377,12 @@ where
                     _marker: std::marker::PhantomData,
                 };
 
-                let synthesis_start = Instant::now();
+                // let synthesis_start = Instant::now();
                 
                 // Log the circuit type and floor planner being used
-                log::info!("🔧 [CIRCUIT_SYNTHESIS] Circuit type: {}, FloorPlanner: {}", 
-                          std::any::type_name::<ConcreteCircuit>(), 
-                          std::any::type_name::<ConcreteCircuit::FloorPlanner>());
+                // log::info!("🔧 [CIRCUIT_SYNTHESIS] Circuit type: {}, FloorPlanner: {}", 
+                //           std::any::type_name::<ConcreteCircuit>(), 
+                //           std::any::type_name::<ConcreteCircuit::FloorPlanner>());
                 
                 // Synthesize the circuit to obtain the witness and other information.
                 ConcreteCircuit::FloorPlanner::synthesize(
@@ -391,9 +391,9 @@ where
                     config.clone(),
                     meta.constants.clone(),
                 )?;
-                log::debug!("    Circuit synthesis: {:?}", synthesis_start.elapsed());
+                // log::debug!("    Circuit synthesis: {:?}", synthesis_start.elapsed());
 
-                let batch_invert_start = Instant::now();
+                // let batch_invert_start = Instant::now();
                 let mut advice_values = batch_invert_assigned::<Scheme::Scalar>(
                     witness
                         .advice
@@ -408,9 +408,9 @@ where
                         })
                         .collect(),
                 );
-                log::debug!("    Batch invert: {:?}", batch_invert_start.elapsed());
+                // log::debug!("    Batch invert: {:?}", batch_invert_start.elapsed());
 
-                let blinding_start = Instant::now();
+                // let blinding_start = Instant::now();
                 // Add blinding factors to advice columns
                 for (column_index, advice_values) in column_indices.iter().zip(&mut advice_values) {
                     if !witness.unblinded_advice.contains(column_index) {
@@ -423,9 +423,9 @@ where
                         }
                     }
                 }
-                log::debug!("    Blinding factors: {:?}", blinding_start.elapsed());
+                // log::debug!("    Blinding factors: {:?}", blinding_start.elapsed());
 
-                let commitment_start = Instant::now();
+                // let commitment_start = Instant::now();
                 // Compute commitments to advice column polynomials
                 let blinds: Vec<_> = column_indices
                     .iter()
@@ -442,13 +442,13 @@ where
                     // Check environment variable for batch mode
                     let use_batch = std::env::var("HALO2_BATCH_MSM").unwrap_or_default() == "1";
 
-                    let batch_start = Instant::now();
+                    // let batch_start = Instant::now();
                     
                     if use_batch {
                         // Use batch MSM for better performance
                         let polynomials: Vec<_> = advice_values.iter().collect();
                         let result = params.commit_lagrange_batch(&polynomials, &blinds);
-                        log::info!("BATCH TOOK :::::: {:?}", batch_start.elapsed());
+                        // log::info!("BATCH TOOK :::::: {:?}", batch_start.elapsed());
                         result
                     } else {
                         // Use original parallel approach
@@ -457,7 +457,7 @@ where
                             .zip(blinds.iter())
                             .map(|(poly, blind)| params.commit_lagrange(poly, *blind))
                             .collect();
-                        log::info!("GPU TOOK ::::::: {:?}", batch_start.elapsed());
+                        // log::info!("GPU TOOK ::::::: {:?}", batch_start.elapsed());
                         result
                     }
                 };
@@ -471,9 +471,9 @@ where
                 let advice_commitments = advice_commitments;
                 drop(advice_commitments_projective);
 
-                log::debug!("    Advice commitments: {:?}", commitment_start.elapsed());
+                // log::debug!("    Advice commitments: {:?}", commitment_start.elapsed());
 
-                let transcript_start = Instant::now();
+                // let transcript_start = Instant::now();
                 for commitment in &advice_commitments {
                     transcript.write_point(*commitment)?;
                 }
@@ -483,8 +483,8 @@ where
                     advice.advice_polys[*column_index] = advice_values;
                     advice.advice_blinds[*column_index] = blind;
                 }
-                log::debug!("    Transcript updates: {:?}", transcript_start.elapsed());
-                log::debug!("    Total circuit processing: {:?}", circuit_start.elapsed());
+                // log::debug!("    Transcript updates: {:?}", transcript_start.elapsed());
+                // log::debug!("    Total circuit processing: {:?}", circuit_start.elapsed());
             }
 
             for (index, phase) in meta.challenge_phase.iter().enumerate() {
@@ -494,7 +494,7 @@ where
                     assert!(existing.is_none());
                 }
             }
-            log::debug!("  Phase {:?} completed: {:?}", current_phase, phase_sub_start.elapsed());
+            // log::debug!("  Phase {:?} completed: {:?}", current_phase, phase_sub_start.elapsed());
         }
 
         assert_eq!(challenges.len(), meta.num_challenges);
@@ -504,10 +504,10 @@ where
 
         (advice, challenges)
     };
-    log::info!("🔄 [PHASE 3] Witness Collection and Advice Preparation: {:?}", phase3_start.elapsed());
+    // log::info!("🔄 [PHASE 3] Witness Collection and Advice Preparation: {:?}", phase3_start.elapsed());
 
     // Phase 4: Lookup Preparation
-    let phase4_start = Instant::now();
+    // let phase4_start = Instant::now();
     
     // Sample theta challenge for keeping lookup columns linearly independent
     let theta: ChallengeTheta<_> = transcript.squeeze_challenge_scalar();
@@ -576,10 +576,10 @@ where
                 .collect()
         })
         .collect::<Result<Vec<_>, _>>()?;
-    log::info!("🔄 [PHASE 4] Lookup Preparation: {:?}", phase4_start.elapsed());
+    // log::info!("🔄 [PHASE 4] Lookup Preparation: {:?}", phase4_start.elapsed());
 
     // Phase 5: Permutation Commitment
-    let phase5_start = Instant::now();
+    // let phase5_start = Instant::now();
     
     // Sample beta challenge
     let beta: ChallengeBeta<_> = transcript.squeeze_challenge_scalar();
@@ -606,7 +606,7 @@ where
             )
         })
         .collect::<Result<Vec<_>, _>>()?;
-    log::info!("🔄 [PHASE 5] Permutation Commitment: {:?}", phase5_start.elapsed());
+    // log::info!("🔄 [PHASE 5] Permutation Commitment: {:?}", phase5_start.elapsed());
 
     // preallocate the lookups
 
@@ -655,7 +655,7 @@ where
     };
 
     // Phase 6: Lookup Product Commitments
-    let phase6_start = Instant::now();
+    // let phase6_start = Instant::now();
     let lookups = commit_lookups()?;
 
     #[cfg(feature = "mv-lookup")]
@@ -667,10 +667,10 @@ where
         }
     }
 
-    log::info!("🔄 [PHASE 6] Lookup Product Commitments: {:?}", phase6_start.elapsed());
+    // log::info!("🔄 [PHASE 6] Lookup Product Commitments: {:?}", phase6_start.elapsed());
 
     // Phase 7: Shuffle Commitments
-    let phase7_start = Instant::now();
+    // let phase7_start = Instant::now();
     let shuffles: Vec<Vec<shuffle::prover::Committed<Scheme::Curve>>> = instance
         .iter()
         .zip(advice.iter())
@@ -698,18 +698,18 @@ where
                 .collect::<Result<Vec<_>, _>>()
         })
         .collect::<Result<Vec<_>, _>>()?;
-    log::info!("🔄 [PHASE 7] Shuffle Commitments: {:?}", phase7_start.elapsed());
+    // log::info!("🔄 [PHASE 7] Shuffle Commitments: {:?}", phase7_start.elapsed());
 
     // Phase 8: Vanishing Argument
-    let phase8_start = Instant::now();
+    // let phase8_start = Instant::now();
     
     // Commit to the vanishing argument's random polynomial for blinding h(x_3)
     let vanishing = vanishing::Argument::commit(params, domain, &mut rng, transcript)?;
-    log::info!("🔄 [PHASE 8] Vanishing Argument - 1 - : {:?}", phase8_start.elapsed());
+    // log::info!("🔄 [PHASE 8] Vanishing Argument - 1 - : {:?}", phase8_start.elapsed());
 
     // Obtain challenge for keeping all separate gates linearly independent
     let y: ChallengeY<_> = transcript.squeeze_challenge_scalar();
-    log::info!("🔄 [PHASE 8] Vanishing Argument - 2 - : {:?}", phase8_start.elapsed());
+    // log::info!("🔄 [PHASE 8] Vanishing Argument - 2 - : {:?}", phase8_start.elapsed());
 
     // Calculate the advice polys
     let advice: Vec<AdviceSingle<Scheme::Curve, Coeff>> = advice
@@ -730,7 +730,7 @@ where
         )
         .collect();
 
-    log::info!("🔄 [PHASE 8] Vanishing Argument - 3 - : {:?}", phase8_start.elapsed());
+    // log::info!("🔄 [PHASE 8] Vanishing Argument - 3 - : {:?}", phase8_start.elapsed());
     // Evaluate the h(X) polynomial
     let h_poly = pk.ev.evaluate_h(
         pk,
@@ -751,11 +751,11 @@ where
         &shuffles,
         &permutations,
     );
-    log::info!("🔄 [PHASE 8] Vanishing Argument - 4 - : {:?}", phase8_start.elapsed());
+    // log::info!("🔄 [PHASE 8] Vanishing Argument - 4 - : {:?}", phase8_start.elapsed());
     // Construct the vanishing argument's h(X) commitments
     let vanishing = vanishing.construct(params, domain, h_poly, &mut rng, transcript)?;
     
-    log::info!("🔄 [PHASE 8] Vanishing Argument: {:?}", phase8_start.elapsed());
+    // log::info!("🔄 [PHASE 8] Vanishing Argument: {:?}", phase8_start.elapsed());
 
     // Phase 9: Challenge Generation and Evaluation
     let phase9_start = Instant::now();
@@ -913,14 +913,14 @@ where
         // We query the h(X) polynomial at x
         .chain(vanishing.open(x));
     
-    log::info!("🔄 [PHASE 9] Challenge Generation and Evaluation: {:?}", phase9_start.elapsed());
+    // log::info!("🔄 [PHASE 9] Challenge Generation and Evaluation: {:?}", phase9_start.elapsed());
 
     #[cfg(feature = "counter")]
     {
         use crate::{FFT_COUNTER, MSM_COUNTER};
         use std::collections::BTreeMap;
-        log::debug!("MSM_COUNTER: {:?}", MSM_COUNTER.lock().unwrap());
-        log::debug!("FFT_COUNTER: {:?}", *FFT_COUNTER.lock().unwrap());
+        // log::debug!("MSM_COUNTER: {:?}", MSM_COUNTER.lock().unwrap());
+        // log::debug!("FFT_COUNTER: {:?}", *FFT_COUNTER.lock().unwrap());
 
         // reset counters at the end of the proving
         *MSM_COUNTER.lock().unwrap() = BTreeMap::new();
@@ -935,31 +935,31 @@ where
         .create_proof(rng, transcript, instances)
         .map_err(|_| Error::ConstraintSystemFailure);
     
-    log::info!("🔄 [PHASE 10] Final Multi-Open Proof: {:?}", phase10_start.elapsed());
+    // log::info!("🔄 [PHASE 10] Final Multi-Open Proof: {:?}", phase10_start.elapsed());
     
     // Total proof generation time
     let total_start = phase1_start;
-    log::info!("🚀 [TOTAL] Complete Proof Generation: {:?}", total_start.elapsed());
+    // log::info!("🚀 [TOTAL] Complete Proof Generation: {:?}", total_start.elapsed());
     
     // Print MSM statistics
-    let (total_msm_count, total_msm_time, gpu_count, cpu_count, metal_count) = crate::arithmetic::get_msm_stats();
-    log::info!("📊 [MSM_STATS] Total MSM operations: {} (GPU: {}, CPU: {}, Metal: {})", 
-               total_msm_count, gpu_count, cpu_count, metal_count);
-    log::info!("📊 [MSM_STATS] Total MSM time: {:?} ({:.2}% of total)", 
-               total_msm_time, (total_msm_time.as_millis() as f64 / total_start.elapsed().as_millis() as f64) * 100.0);
-    if total_msm_count > 0 {
-        log::info!("📊 [MSM_STATS] Average MSM time: {:?}", total_msm_time / total_msm_count as u32);
-    }
+    // let (total_msm_count, total_msm_time, gpu_count, cpu_count, metal_count) = crate::arithmetic::get_msm_stats();
+    // log::info!("📊 [MSM_STATS] Total MSM operations: {} (GPU: {}, CPU: {}, Metal: {})", 
+    //            total_msm_count, gpu_count, cpu_count, metal_count);
+    // log::info!("📊 [MSM_STATS] Total MSM time: {:?} ({:.2}% of total)", 
+    //            total_msm_time, (total_msm_time.as_millis() as f64 / total_start.elapsed().as_millis() as f64) * 100.0);
+    // if total_msm_count > 0 {
+    //     log::info!("📊 [MSM_STATS] Average MSM time: {:?}", total_msm_time / total_msm_count as u32);
+    // }
     
     // Print FFT statistics
-    let (total_fft_count, total_fft_time, fft_gpu_count, fft_cpu_count) = crate::arithmetic::get_fft_stats();
-    log::info!("📊 [FFT_STATS] Total FFT operations: {} (GPU: {}, CPU: {})", 
-               total_fft_count, fft_gpu_count, fft_cpu_count);
-    log::info!("📊 [FFT_STATS] Total FFT time: {:?} ({:.2}% of total)", 
-               total_fft_time, (total_fft_time.as_millis() as f64 / total_start.elapsed().as_millis() as f64) * 100.0);
-    if total_fft_count > 0 {
-        log::info!("📊 [FFT_STATS] Average FFT time: {:?}", total_fft_time / total_fft_count as u32);
-    }
+    // let (total_fft_count, total_fft_time, fft_gpu_count, fft_cpu_count) = crate::arithmetic::get_fft_stats();
+    // log::info!("📊 [FFT_STATS] Total FFT operations: {} (GPU: {}, CPU: {})", 
+    //            total_fft_count, fft_gpu_count, fft_cpu_count);
+    // log::info!("📊 [FFT_STATS] Total FFT time: {:?} ({:.2}% of total)", 
+    //            total_fft_time, (total_fft_time.as_millis() as f64 / total_start.elapsed().as_millis() as f64) * 100.0);
+    // if total_fft_count > 0 {
+    //     log::info!("📊 [FFT_STATS] Average FFT time: {:?}", total_fft_time / total_fft_count as u32);
+    // }
     
     result
 }

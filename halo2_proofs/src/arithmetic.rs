@@ -41,7 +41,7 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
         && !icicle::should_use_cpu_msm(coeffs.len())
         && icicle::is_gpu_supported_field(&coeffs[0])
     {
-        log::debug!("🔄 [MSM_DISPATCH] Using GPU path: {} elements (log2: {})", data_size, log_size);
+        // log::debug!("🔄 [MSM_DISPATCH] Using GPU path: {} elements (log2: {})", data_size, log_size);
         return best_multiexp_gpu(coeffs, bases);
     }
 
@@ -63,7 +63,7 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
             );
         });
 
-        log::debug!("🔄 [MSM_DISPATCH] Using Metal path: {} elements (log2: {})", data_size, log_size);
+        // log::debug!("🔄 [MSM_DISPATCH] Using Metal path: {} elements (log2: {})", data_size, log_size);
         
         // Perform MSM using Metal acceleration with timing
         use instant::Instant;
@@ -71,8 +71,8 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
         let result = mopro_msm::metal::msm_best::<C, H2GAffine, H2G, H2Fr>(coeffs, bases);
         let elapsed = msm_start.elapsed();
         
-        log::info!("⚡ [MSM_METAL] Metal MSM completed: {} elements in {:?} ({:.2} elements/ms)", 
-                   data_size, elapsed, data_size as f64 / elapsed.as_millis() as f64);
+        // log::info!("⚡ [MSM_METAL] Metal MSM completed: {} elements in {:?} ({:.2} elements/ms)", 
+        //            data_size, elapsed, data_size as f64 / elapsed.as_millis() as f64);
         
         // Update global counters
         MSM_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -82,7 +82,7 @@ pub fn best_multiexp<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C]) -> C::Cu
         return result;
     }
 
-    log::debug!("🔄 [MSM_DISPATCH] Using CPU path: {} elements (log2: {})", data_size, log_size);
+    // log::debug!("🔄 [MSM_DISPATCH] Using CPU path: {} elements (log2: {})", data_size, log_size);
     #[allow(unreachable_code)]
     best_multiexp_cpu(coeffs, bases)
 }
@@ -121,15 +121,15 @@ pub fn best_multiexp_gpu<C: CurveAffine>(coeffs: &[C::Scalar], g: &[C]) -> C::Cu
     use instant::Instant;
     
     let msm_start = Instant::now();
-    let data_size = coeffs.len();
+    // let data_size = coeffs.len();
     
-    log::debug!("🚀 [MSM_GPU] Starting GPU MSM: {} elements", data_size);
+    // log::debug!("🚀 [MSM_GPU] Starting GPU MSM: {} elements", data_size);
     
     let result = icicle::multiexp_on_device::<C>(coeffs, g);
     
     let elapsed = msm_start.elapsed();
-    log::info!("⚡ [MSM_GPU] GPU MSM completed: {} elements in {:?} ({:.2} elements/ms)", 
-               data_size, elapsed, data_size as f64 / elapsed.as_millis() as f64);
+    // log::info!("⚡ [MSM_GPU] GPU MSM completed: {} elements in {:?} ({:.2} elements/ms)", 
+    //            data_size, elapsed, data_size as f64 / elapsed.as_millis() as f64);
     
     // Update global counters
     MSM_COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -312,23 +312,23 @@ pub fn best_fft<Scalar: Field + ff::PrimeField, G: FftGroup<Scalar> + ff::PrimeF
     data: &FFTData<Scalar>,
     inverse: bool,
 ) {
-    let data_size = scalars.len();
+    // let data_size = scalars.len();
     
     #[cfg(feature = "icicle_gpu")]
     if env::var("ENABLE_ICICLE_GPU").is_ok()
         && !icicle::should_use_cpu_fft(scalars.len())
         && icicle::is_gpu_supported_field(&omega)
     {
-        log::debug!("🔄 [FFT_DISPATCH] Using GPU path: {} elements (log2: {})", data_size, log_n);
+        // log::debug!("🔄 [FFT_DISPATCH] Using GPU path: {} elements (log2: {})", data_size, log_n);
         best_fft_gpu(scalars, omega, log_n, inverse);
     } else {
-        log::debug!("🔄 [FFT_DISPATCH] Using CPU path: {} elements (log2: {})", data_size, log_n);
+        // log::debug!("🔄 [FFT_DISPATCH] Using CPU path: {} elements (log2: {})", data_size, log_n);
         best_fft_cpu(scalars, omega, log_n, data, inverse);
     }
 
     #[cfg(not(feature = "icicle_gpu"))]
     {
-        log::debug!("🔄 [FFT_DISPATCH] Using CPU path: {} elements (log2: {})", data_size, log_n);
+        // log::debug!("🔄 [FFT_DISPATCH] Using CPU path: {} elements (log2: {})", data_size, log_n);
         best_fft_cpu(scalars, omega, log_n, data, inverse);
     }
 }
@@ -343,14 +343,14 @@ pub fn best_fft_gpu<Scalar: Field + ff::PrimeField, G: FftGroup<Scalar> + ff::Pr
 ) {
     use instant::Instant;
     let fft_start = Instant::now();
-    let data_size = a.len();
-    log::debug!("🚀 [FFT_GPU] Starting GPU FFT: {} elements (log2: {})", data_size, log_n);
+    // let data_size = a.len();
+    // log::debug!("🚀 [FFT_GPU] Starting GPU FFT: {} elements (log2: {})", data_size, log_n);
     
     icicle::fft_on_device::<Scalar, G>(a, omega, log_n, inverse);
     
     let elapsed = fft_start.elapsed();
-    log::info!("⚡ [FFT_GPU] GPU FFT completed: {} elements in {:?} ({:.2} elements/ms)",
-               data_size, elapsed, data_size as f64 / elapsed.as_millis() as f64);
+    // log::info!("⚡ [FFT_GPU] GPU FFT completed: {} elements in {:?} ({:.2} elements/ms)",
+    //            data_size, elapsed, data_size as f64 / elapsed.as_millis() as f64);
     
     // Update global counters
     FFT_COUNTER.fetch_add(1, Ordering::Relaxed);

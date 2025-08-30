@@ -383,7 +383,7 @@ impl<C: CurveAffine> Evaluator<C> {
         shuffles: &[Vec<shuffle::prover::Committed<C>>],
         permutations: &[permutation::prover::Committed<C>],
     ) -> Polynomial<C::ScalarExt, ExtendedLagrangeCoeff> {
-        let start = instant::Instant::now();
+        // let start = instant::Instant::now();
         let domain = &pk.vk.domain;
         let size = domain.extended_len();
         let rot_scale = 1 << (domain.extended_k() - domain.k());
@@ -395,9 +395,9 @@ impl<C: CurveAffine> Evaluator<C> {
         let l_last = &pk.l_last;
         let l_active_row = &pk.l_active_row;
         let p = &pk.vk.cs.permutation;
-        log::trace!(" - Initialization: {:?}", start.elapsed());
+        // log::trace!(" - Initialization: {:?}", start.elapsed());
 
-        let start = instant::Instant::now();
+        // let start = instant::Instant::now();
         // Calculate the advice and instance cosets
         let advice: Vec<Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>> = advice_polys
             .iter()
@@ -408,9 +408,9 @@ impl<C: CurveAffine> Evaluator<C> {
                     .collect()
             })
             .collect();
-        log::trace!(" - Advice cosets: {:?}", start.elapsed());
+        // log::trace!(" - Advice cosets: {:?}", start.elapsed());
 
-        let start = instant::Instant::now();
+        // let start = instant::Instant::now();
         let instance: Vec<Vec<Polynomial<C::Scalar, ExtendedLagrangeCoeff>>> = instance_polys
             .iter()
             .map(|instance_polys| {
@@ -420,13 +420,13 @@ impl<C: CurveAffine> Evaluator<C> {
                     .collect()
             })
             .collect();
-        log::trace!(" - Instance cosets: {:?}", start.elapsed());
+        // log::trace!(" - Instance cosets: {:?}", start.elapsed());
 
         let mut values = domain.empty_extended();
 
         // Core expression evaluations
 
-        let start = instant::Instant::now();
+        // let start = instant::Instant::now();
         let num_threads = multicore::current_num_threads();
         for ((((advice, instance), lookups), shuffles), permutation) in advice
             .iter()
@@ -464,7 +464,7 @@ impl<C: CurveAffine> Evaluator<C> {
                     });
                 }
             });
-            log::trace!(" - Custom gates: {:?}", start.elapsed());
+            // log::trace!(" - Custom gates: {:?}", start.elapsed());
 
             // Permutations
             let start = instant::Instant::now();
@@ -548,14 +548,14 @@ impl<C: CurveAffine> Evaluator<C> {
                     }
                 });
             }
-            log::trace!(" - Permutations: {:?}", start.elapsed());
+            // log::trace!(" - Permutations: {:?}", start.elapsed());
 
-            let start = instant::Instant::now();
+            // let start = instant::Instant::now();
             // For lookups, compute inputs_inv_sum = ∑ 1 / (f_i(X) + α)
             // The outer vector has capacity self.lookups.len()
             // The middle vector has capacity domain.extended_len()
             // The inner vector has capacity
-            log::info!("num lookups: {}", lookups.len());
+            // log::info!("num lookups: {}", lookups.len());
 
             #[cfg(feature = "mv-lookup")]
             let inputs_inv_sum_cosets: Vec<_> = {
@@ -567,10 +567,10 @@ impl<C: CurveAffine> Evaluator<C> {
                     .unwrap_or(10000);
                 
                 if use_optimized {
-                    log::info!("🚀 [OPTIMIZED] Using optimized lookup inverse sum computation");
+                    // log::info!("🚀 [OPTIMIZED] Using optimized lookup inverse sum computation");
                     
                     // AGGRESSIVE OPTIMIZATION: Single-level parallelization with pre-allocated buffers
-                    let eval_start = instant::Instant::now();
+                    // let eval_start = instant::Instant::now();
                     let results = lookups
                         .par_iter()
                         .enumerate()
@@ -625,9 +625,9 @@ impl<C: CurveAffine> Evaluator<C> {
                             }
 
                             // Batch inversion
-                            let invert_start = instant::Instant::now();
+                            // let invert_start = instant::Instant::now();
                             inputs_values_for_extended_domain.batch_invert();
-                            log::debug!("    Batch inversion for lookup {}: {:?}", n, invert_start.elapsed());
+                            // log::debug!("    Batch inversion for lookup {}: {:?}", n, invert_start.elapsed());
 
                             // Reshape results efficiently
                             let inputs_inv_sums: Vec<Vec<_>> = inputs_values_for_extended_domain
@@ -643,7 +643,7 @@ impl<C: CurveAffine> Evaluator<C> {
                         })
                         .collect();
                     
-                    log::debug!("    Total evaluation time: {:?}", eval_start.elapsed());
+                    // log::debug!("    Total evaluation time: {:?}", eval_start.elapsed());
                     results
                 } else {
                     log::info!("🔄 [STANDARD] Using standard lookup inverse sum computation");
@@ -707,8 +707,8 @@ impl<C: CurveAffine> Evaluator<C> {
                         .collect()
                 }
             };
-            #[cfg(feature = "mv-lookup")]
-            log::info!(" - Lookups inv sum: {:?}", start.elapsed());
+            // #[cfg(feature = "mv-lookup")]
+            // log::info!(" - Lookups inv sum: {:?}", start.elapsed());
 
             #[cfg(feature = "mv-lookup")]
             let start = instant::Instant::now();
@@ -1067,7 +1067,7 @@ impl<C: CurveAffine> Evaluator<C> {
                     }
                 });
             }
-            log::trace!(" - Shuffle constraints: {:?}", start.elapsed());
+            // log::trace!(" - Shuffle constraints: {:?}", start.elapsed());
         }
         values
     }
