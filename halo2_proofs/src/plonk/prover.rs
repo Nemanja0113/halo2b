@@ -938,7 +938,7 @@ where
     // log::info!("🔄 [PHASE 10] Final Multi-Open Proof: {:?}", phase10_start.elapsed());
     
     // Total proof generation time
-    let total_start = phase1_start;
+    // let total_start = phase1_start;
     // log::info!("🚀 [TOTAL] Complete Proof Generation: {:?}", total_start.elapsed());
     
     // Print MSM statistics
